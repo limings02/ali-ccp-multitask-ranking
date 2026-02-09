@@ -213,6 +213,9 @@ class MultiTaskBCELoss:
         aux_focal_detach_p_for_weight: bool = True,
         aux_focal_compute_fp32: bool = True,
         aux_focal_log_components: bool = True,
+        # ===== 负采样权重补偿 =====
+        neg_sample_weight_correction: bool = False,
+        neg_keep_prob_train: float = 1.0,
         # Global step tracker (will be updated externally by trainer)
         global_step: int = 0,
     ):
@@ -259,6 +262,14 @@ class MultiTaskBCELoss:
         self.aux_focal_detach_p_for_weight = bool(aux_focal_detach_p_for_weight)
         self.aux_focal_compute_fp32 = bool(aux_focal_compute_fp32)
         self.aux_focal_log_components = bool(aux_focal_log_components)
+        
+        # ===== 负采样权重补偿配置 =====
+        self.neg_sample_weight_correction = bool(neg_sample_weight_correction)
+        self.neg_keep_prob_train = float(neg_keep_prob_train)
+        if self.neg_sample_weight_correction and self.neg_keep_prob_train < 1.0:
+            self.neg_sample_weight = 1.0 / self.neg_keep_prob_train
+        else:
+            self.neg_sample_weight = 1.0
         
         # Global step for warmup control (updated externally by trainer)
         self.global_step = int(global_step)
@@ -458,9 +469,20 @@ class MultiTaskBCELoss:
         pos_weight_ctr_effective_val = float(ctr_pw_effective)
 
         # CTR loss (standard BCE with logits)
-        loss_ctr = F.binary_cross_entropy_with_logits(
-            ctr_logit_f32, y_ctr_f32, reduction="mean", pos_weight=pos_weight_ctr
+        loss_ctr_bce = F.binary_cross_entropy_with_logits(
+            ctr_logit_f32, y_ctr_f32, reduction="none", pos_weight=pos_weight_ctr
         )
+        
+        # 负采样权重补偿：对被保留的负样本乘以 1/neg_keep_prob
+        if self.neg_sample_weight_correction and self.neg_keep_prob_train < 1.0:
+            neg_sample_weight = torch.where(
+                y_ctr_f32 > 0.5,
+                torch.ones_like(loss_ctr_bce),  # 正样本权重 = 1
+                torch.tensor(self.neg_sample_weight, device=loss_ctr_bce.device, dtype=torch.float32),  # 负样本权重补偿
+            )
+            loss_ctr_bce = loss_ctr_bce * neg_sample_weight
+        
+        loss_ctr = loss_ctr_bce.mean()
 
         if self.esmm_version == "v2":
             # ============================================================

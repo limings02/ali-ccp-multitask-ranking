@@ -1,5 +1,5 @@
 experiment:
-  name: more_l_hetero_ple
+  name: gateall_hetero_ple
 use_esmm: true
 esmm:
   version: v2
@@ -10,7 +10,7 @@ esmm:
 data:
   metadata_path: data/processed/metadata.json
   batch_size: 1024
-  num_workers: 2
+  num_workers: 4
   num_workers_valid: 2
   prefetch_factor: 1
   pin_memory: true
@@ -27,7 +27,7 @@ embedding:
   mode: sum
   sparse_grad: true
 model:
-  name: more_ple_hetero
+  name: gateall_hetero_ple
   mtl: ple
   enabled_heads:
   - ctr
@@ -128,17 +128,17 @@ model:
     gate_stabilize:
       enabled: true
       eps: 1.0e-08
-      entropy_reg_weight: 1.0e-4
-      load_balance_kl_weight: 2.0e-4
+      entropy_reg_weight: 3.0e-4
+      load_balance_kl_weight: 3.0e-4
       log_stats: true
       schedule:
         enabled: true
         warm_frac: 0.2
-        temperature_start: 1.3
+        temperature_start: 1.2
         temperature_end: 1.0
         noise_std_start: 0.05
         noise_std_end: 0.01
-    gate_reg_scope: shared_only
+    gate_reg_scope: all
     gate_shared_mass_floor:
       enabled: false
       per_task:
@@ -149,13 +149,13 @@ model:
           min_mass: 0.2
           weight: 0.0005
     input: deep_h
-    add_fm_vec: true
-    add_emb: mean
-    part_proj_dim: 128
-    fusion: concat
-    adapter_mlp_dims:
-    - 128
-    norm: layernorm
+    # add_fm_vec: false
+    # add_emb: none
+    # part_proj_dim: null
+    # fusion: concat
+    # adapter_mlp_dims:
+    
+    # norm: layernorm
   log_gates: true
   heads:
     default:
@@ -196,17 +196,17 @@ optim:
     enabled: true
     target: both
     type: cosine
-    warmup_steps: 16000
-    total_steps: 100000
+    warmup_steps: 5000
+    total_steps: 80000
     min_lr_ratio: 0.1
 loss:
   w_ctr: 1.0
   w_cvr: 1.0
   eps: 1.0e-06
-  pos_weight_dynamic: True
+  pos_weight_dynamic: false
   static_pos_weight:
-    ctr: 10
-    ctcvr: 20
+    ctr: 1
+    ctcvr: 1
   pos_weight_clip:
     ctr: 10
     ctcvr: 20
@@ -233,14 +233,14 @@ loss:
     log_components: true
 runtime:
   device: cuda
-  epochs: 3
+  epochs: 2
   log_every: 3000
   amp: true
   grad_diag_enabled: true
   grad_diag_every: 1000
   grad_diag_min_tasks: 2
   log_health_metrics: true
-  max_train_steps: 100000
+  max_train_steps: 80000
   max_valid_steps: null
   grad_clip_norm: 2.0
   seed: 20260127

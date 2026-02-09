@@ -1,0 +1,257 @@
+# ============================================================================
+# Interview Chain - E3.1: MMoE + Gate Stabilize + ESMM v2
+# ============================================================================
+# 实验定位：DeepFM shared-bottom + MMoE + Gate Stabilize + ESMM v2
+# 消融对比：E3 的 ablation - 启用 gate_stabilize 以稳定 MMoE 的 gate 学习
+# 
+# 关键变量：
+#   - model.mtl = "mmoe"（继承 E3）
+#   - model.mmoe.num_experts = 4（继承 E3）
+#   - model.mmoe.expert_mlp_dims = [128]（继承 E3）
+#   - model.mmoe.gate_stabilize.enabled = true（E3.1 特异，消融变量）
+#   - use_esmm = true（继承 E3）
+#
+# Gate Stabilize 机制：
+#   1. temperature: 1.5 -> 1.0（初期平滑化 gating，后期趋紧）
+#   2. noise_std: 0.05 -> 0.0（早期添加探索噪声，后期移除）
+#   3. entropy_reg: 鼓励 gate 分布更均匀，防止专家闲置
+#   4. load_balance_kl: 负载均衡正则，确保各专家被均匀利用
+# ============================================================================
+
+experiment:
+  name: "base_mmoe"
+
+# ESMM toggle（继承 E3）
+use_esmm: true
+esmm:
+  version: "v2"
+  eps: 1.0e-8
+  lambda_ctr: 1.0
+  lambda_ctcvr: 1.0
+  lambda_cvr_aux: 0.1
+
+# ============================================================================
+# Data Config（公共锁定）
+# ============================================================================
+data:
+  metadata_path: "data/processed/metadata.json"
+  batch_size: 1024                    # 公共锁定
+  num_workers: 4
+  num_workers_valid: 2
+  prefetch_factor: 1
+  pin_memory: true
+  persistent_workers: false
+  drop_last: false
+  debug: false
+  seed: 20260127                      # 公共锁定
+  neg_keep_prob_train: 1.0            # 不使用 negative sampling
+
+sampling:
+  negative_sampling: "none"           # ESMM 约束：必须为 none
+
+# ============================================================================
+# Embedding Config（公共锁定）
+# ============================================================================
+embedding:
+  default_embedding_dim: 8            # 公共锁定
+  embedding_dim_overrides: {}
+  mode: "sum"
+  sparse_grad: true                   # 公共锁定
+
+# ============================================================================
+# Model Config
+# ============================================================================
+model:
+  name: "base_mmoe"
+  mtl: "mmoe"                         # 继承 E3：MMoE
+  enabled_heads: ["ctr", "cvr"]       # 双任务
+  tasks: ["ctr", "cvr"]               # 双任务
+  
+  # Backbone 配置（公共锁定）
+  backbone:
+    use_legacy_pseudo_deepfm: false
+    return_logit_parts: true
+    per_head_add:
+      ctr: { use_wide: true, use_fm: true }
+      cvr: { use_wide: false, use_fm: false }
+    deep_hidden_dims: [128, 64]
+    deep_dropout: 0.2
+    deep_activation: relu
+    deep_use_bn: false
+    fm_enabled: true
+    fm_projection_dim: 16
+    out_dim: 64
+  
+  # MMoE 配置（E3.1 特异：启用 gate_stabilize）
+  mmoe:
+    num_experts: 4                    # 继承 E3：4 个共享专家
+    expert_mlp_dims: [128]            # 继承 E3：每个专家是简单的 MLP
+    gate_type: "linear"               # 继承 E3：线性 gate
+    gate_hidden_dims: [64]            # 测试，给gate一点非线性
+    input: "deep_h"                   # 继承 E3：输入为 DeepFM 的 deep_h
+    # add_fm_vec: false
+    # add_emb: "none"
+    # part_proj_dim: null
+    # fusion: "concat"
+    # adapter_mlp_dims:
+    # norm: "layernorm"
+    dropout: 0.0                      # 继承 E3：专家内部无 dropout
+    log_gates: true
+    # E3.1 特异：启用 gate_stabilize（消融变量）
+    gate_stabilize:
+      enabled: true
+      eps: 1.0e-8
+      entropy_reg_weight: 1.0e-4      # 熵正则：鼓励 gate 分布更均匀
+      load_balance_kl_weight: 1.0e-4  # 负载均衡 KL 正则：确保各专家被均匀利用
+      log_stats: true                 # 记录 gate 统计信息
+      # Temperature/Noise 退火 Schedule
+      schedule:
+        enabled: true
+        warm_frac: 0.2                # warmup 占总步数的 20%
+        temperature_start: 1.2        # 初始温度（较高更平滑）
+        temperature_end: 1.0          # 最终温度
+        noise_std_start: 0.03         # 初始噪声标准差
+        noise_std_end: 0.0            # 最终噪声（训练后期关闭）
+  
+  # Head 配置（公共锁定）
+  heads:
+    default:
+      mlp_dims: [128]
+      dropout: 0.1
+      use_bn: false
+      activation: "relu"
+    ctr: {}
+    cvr: {}
+  
+  # Deep 网络配置（公共锁定）
+  deep_hidden_dims: [256, 128]
+  deep_dropout: 0.2
+  deep_activation: "relu"
+  deep_use_bn: false
+  fm_enabled: true
+  fm_projection_dim: 16
+  out_dim: 128
+
+# ============================================================================
+# Optimizer Config（公共锁定）
+# ============================================================================
+optim:
+  type: dual_sparse_dense
+  dense:
+    lr: 0.0006
+    weight_decay: 1e-5
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+  sparse:
+    enabled: true
+    lr: 0.001
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    allow_fallback_if_empty: false
+  lr_scheduler:
+    enabled: true
+    target: "both"
+    type: "cosine"
+    warmup_steps: 5000
+    total_steps: 80000                # 公共锁定：确保所有实验训练步数一致
+    min_lr_ratio: 0.1
+
+# ============================================================================
+# Loss Config（公共锁定）
+# ============================================================================
+loss:
+  w_ctr: 1.0
+  w_cvr: 1.0
+  eps: 1.0e-6
+  pos_weight_dynamic: false
+  static_pos_weight:
+    ctr: 1
+    ctcvr: 1
+  neg_sample_weight_correction: false  # 启用负采样权重补偿
+  pos_weight_clip:
+    ctr: 10
+    ctcvr: 20
+  pos_weight_clip_schedule:
+    enabled: false
+    target: "ctcvr"
+    type: "piecewise"
+    milestones: [0, 8000]
+    values: [300, 30]
+  aux_focal:
+    enabled: false
+    warmup_steps: 8000
+    target_head: "ctcvr"
+    lambda: 0.05
+    gamma: 1.0
+    use_alpha: false
+    alpha: 0.25
+    detach_p_for_weight: true
+    compute_fp32: true
+    log_components: true
+
+# ============================================================================
+# Runtime Config（公共锁定）
+# ============================================================================
+runtime:
+  device: "cuda"
+  epochs: 2
+  log_every: 3000
+  amp: true
+  grad_diag_enabled: true
+  grad_diag_every: 1000
+  grad_diag_min_tasks: 2
+  log_health_metrics: true
+  max_train_steps: 80000              # 公共锁定：确保所有实验训练步数一致
+  max_valid_steps: null
+  grad_clip_norm: 2.0
+  seed: 20260127                      # 公共锁定
+  resume_path: null
+  auto_eval: true
+  auto_eval_split: "valid"
+  auto_eval_save_preds: true
+  auto_eval_ckpt: "best"
+  save_last: false
+  
+  # BestSelector 配置（ESMM 模式：primary=ctcvr, aux=ctr/cvr）
+  best_selection:
+    strategy: "gate"
+    primary_key: "auc_ctcvr"          # 继承 E3：ESMM 模式下关注 CTCVR
+    aux_keys: ["auc_ctr", "auc_cvr"]
+    use_primary_ma: false
+    ma_window: 5
+    tol_primary: 0.0001
+    tol_aux:
+      auc_ctr: 0.003
+      auc_cvr: 0.008
+    confirm_times: 1
+    cooldown_evals: 0
+    log_decision: true
+
+  # 专家健康诊断配置
+  expert_health_diag:
+    enabled: true
+    log_interval: 1000
+    log_on_valid: true
+    utilization:
+      enabled: true
+      dead_threshold: 0.01
+      monopoly_threshold: 0.8
+      compute_gini: true
+    output_stats:
+      enabled: true
+      per_expert_stats: true
+      cross_expert_similarity: true
+      similarity_alert_threshold: 0.95
+    gradient:
+      enabled: true
+      per_expert_grad_norm: true
+      vanish_threshold: 1.0e-6
+      explode_threshold: 100.0
+    type_specialization:
+      enabled: true
+      aggregate_by_type: true
+      cross_task_specialization: true
+    aligner:
+      enabled: true
+      log_scale_stats: true
+      log_distribution_change: false

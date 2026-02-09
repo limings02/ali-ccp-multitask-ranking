@@ -131,23 +131,9 @@ class Trainer:
         static_pos_weight_cfg = loss_cfg.get("static_pos_weight", {}) or {}
         pos_weight_clip_cfg = loss_cfg.get("pos_weight_clip", {}) or {}
 
-        def _validate_esmm_requirements() -> None:
-            if not self.use_esmm:
-                return
-            if bool(loss_cfg.get("pos_weight_dynamic", True)):
-                raise ValueError("use_esmm=true requires loss.pos_weight_dynamic to be false (static pos_weight only).")
-            if self.negative_sampling not in {"none", "off", "disable", "disabled"}:
-                raise ValueError(
-                    f"use_esmm=true requires sampling.negative_sampling='none'; got '{self.negative_sampling}'."
-                )
-            if "ctr" not in static_pos_weight_cfg or "ctcvr" not in static_pos_weight_cfg:
-                raise ValueError("use_esmm=true requires loss.static_pos_weight.ctr and loss.static_pos_weight.ctcvr to be set.")
-
-        _validate_esmm_requirements()
-
-        # Resolve negative sampling keep prob (enforced to 1.0 for ESMM)
+        # Resolve negative sampling keep prob (honor config unless explicitly disabled)
         neg_keep_prob_cfg = float(cfg.get("data", {}).get("neg_keep_prob_train", 1.0))
-        if self.negative_sampling in {"none", "off", "disable", "disabled"} or self.use_esmm:
+        if self.negative_sampling in {"none", "off", "disable", "disabled"}:
             self.neg_keep_prob_train = 1.0
         else:
             self.neg_keep_prob_train = neg_keep_prob_cfg
@@ -258,6 +244,9 @@ class Trainer:
             aux_focal_detach_p_for_weight=bool(aux_focal_cfg.get("detach_p_for_weight", True)),
             aux_focal_compute_fp32=bool(aux_focal_cfg.get("compute_fp32", True)),
             aux_focal_log_components=bool(aux_focal_cfg.get("log_components", True)),
+            # 负采样权重补偿
+            neg_sample_weight_correction=bool(loss_cfg.get("neg_sample_weight_correction", False)),
+            neg_keep_prob_train=self.neg_keep_prob_train,
             global_step=0,  # Will be updated in training loop
         )
 

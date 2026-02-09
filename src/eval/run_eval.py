@@ -143,13 +143,14 @@ def run_eval(
     # This does NOT affect AUC (rank-preserving), but fixes logloss/ECE/pred_mean.
     sampling_mode = str(cfg.get("sampling", {}).get("negative_sampling", "keep_prob")).lower()
     neg_keep_prob = float(cfg.get("data", {}).get("neg_keep_prob_train", 1.0))
-    if use_esmm or sampling_mode in {"none", "off", "disable", "disabled"}:
+    # Only disable correction if sampling is explicitly disabled
+    if sampling_mode in {"none", "off", "disable", "disabled"}:
         neg_keep_prob = 1.0
     logit_correction = 0.0
     if neg_keep_prob < 1.0 and neg_keep_prob > 0.0:
         # Correction term to shift from sampled distribution to original distribution
         logit_correction = float(np.log((1.0 - neg_keep_prob) / neg_keep_prob))
-        log.info("Applying logit correction=%.4f for neg_keep_prob=%.3f", logit_correction, neg_keep_prob)
+        log.info("Applying logit correction=%.4f for neg_keep_prob=%.3f (use_esmm=%s)", logit_correction, neg_keep_prob, use_esmm)
 
     # Forward pass to collect logits/labels for metrics
     use_ctr = "ctr" in enabled_heads

@@ -558,9 +558,41 @@ class PLE(nn.Module):
         self.specific_experts = nn.ModuleDict()
         self.num_specific_experts: Dict[str, int] = {}
         self._expert_names: Dict[str, List[str]] = {}
+
+        # Allow specific_num_experts to override private expert counts in hetero mode
+        specific_cfg = ple_cfg.get("specific_num_experts")
+        requested_specific: Dict[str, Optional[int]] = {}
+        if isinstance(specific_cfg, int):
+            requested_specific = {task: int(specific_cfg) for task in tasks}
+        elif isinstance(specific_cfg, dict):
+            default_specific = specific_cfg.get("default", None)
+            for task in tasks:
+                if task in specific_cfg:
+                    requested_specific[task] = int(specific_cfg.get(task))
+                elif default_specific is not None:
+                    requested_specific[task] = int(default_specific)
+                else:
+                    requested_specific[task] = None
+        else:
+            requested_specific = {task: None for task in tasks}
         
         for task in tasks:
             task_specs = private_cfg.get(task, [])
+            requested = requested_specific.get(task)
+            if requested is not None:
+                if requested < 0:
+                    raise ValueError(f"specific_num_experts[{task}] must be >= 0, got {requested}")
+                if requested > len(task_specs):
+                    raise ValueError(
+                        f"specific_num_experts[{task}]={requested} exceeds "
+                        f"available private specs={len(task_specs)}"
+                    )
+                if requested != len(task_specs):
+                    logger.info(
+                        "[PLE] Hetero experts: task %s private experts truncated to %d (from %d) due to specific_num_experts",
+                        task, requested, len(task_specs)
+                    )
+                task_specs = task_specs[:requested]
             self.num_specific_experts[task] = len(task_specs)
             
             if task_specs:
