@@ -83,7 +83,7 @@ model:
     fm_projection_dim: 16
     out_dim: 64
   ple:
-    hetero_enabled: true
+    hetero_enabled: false
     expert_out_dim: 128
     expert_output_align:
       layernorm: true
@@ -137,7 +137,6 @@ model:
           type: mlp
           dims:
           - 128
-          - 64
           activation: relu
           dropout: 0.05
           use_bn: false
