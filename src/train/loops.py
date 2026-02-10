@@ -718,6 +718,29 @@ def train_one_epoch(
                 if mass_loss is not None and mass_loss > 1e-8:
                     log_parts.append(f"mass_floor_loss_{task}={mass_loss:.6f}")
             
+            # ============================================================
+            # Residual Head: Log residual diagnostics
+            # ============================================================
+            if loss_dict.get("residual_enabled"):
+                r_abs_mean = loss_dict.get("residual_r_abs_mean")
+                r_abs_p95 = loss_dict.get("residual_r_abs_p95")
+                corr_ctr = loss_dict.get("corr_r_ctr")
+                corr_cvr = loss_dict.get("corr_r_cvr")
+                if r_abs_mean is not None:
+                    log_parts.append(f"r_abs_mean={r_abs_mean:.4f}")
+                if r_abs_p95 is not None:
+                    log_parts.append(f"r_abs_p95={r_abs_p95:.4f}")
+                if corr_ctr is not None:
+                    log_parts.append(f"corr_r_ctr={corr_ctr:.3f}")
+                if corr_cvr is not None:
+                    log_parts.append(f"corr_r_cvr={corr_cvr:.3f}")
+                loss_res_reg = loss_dict.get("loss_res_reg")
+                if loss_res_reg is not None and loss_res_reg > 1e-8:
+                    log_parts.append(f"loss_res_reg={loss_res_reg:.6f}")
+                loss_anchor = loss_dict.get("loss_anchor")
+                if loss_anchor is not None and loss_anchor > 1e-8:
+                    log_parts.append(f"loss_anchor={loss_anchor:.6f}")
+            
             # Add performance metrics
             log_parts.append(f"samples={n_rows} steps/s={steps_per_sec:.2f} samples/s={samples_per_sec:.1f}")
             log_parts.append(f"time={elapsed:.2f}s")
@@ -918,6 +941,13 @@ def validate(
     gate_cvr_list: List[torch.Tensor] = []
     p_ctcvr_list: List[torch.Tensor] = []  # For CTCVR prob stats
 
+    # ============================================================
+    # Residual Head: 额外收集 residual 版本的 CTCVR logit
+    # 用于同时输出 ctcvr_auc_mul 和 ctcvr_auc_res
+    # ============================================================
+    ctcvr_logit_res_list: List[torch.Tensor] = []
+    residual_enabled = bool(getattr(loss_fn, "residual_enabled", False))
+
     with torch.no_grad():
         for step, (labels, features, meta) in enumerate(loader):
             if max_steps is not None and step >= max_steps:
@@ -966,6 +996,15 @@ def validate(
                         ctcvr_logit = torch.log(p_ctcvr / (1.0 - p_ctcvr))
                         ctcvr_logit_list.append(ctcvr_logit.detach().cpu())
                         y_ctcvr_list.append(labels["y_ctcvr"].detach().cpu())
+
+                        # Residual Head: 计算 residual 版本的 CTCVR logit
+                        # ctcvr_logit_res = ctr_logit + cvr_logit + r_logit (logit 空间加法)
+                        if residual_enabled and "residual_logit" in outputs:
+                            r_logit = outputs["residual_logit"].detach()
+                            if r_logit.dim() == 2:
+                                r_logit = r_logit.squeeze(-1)
+                            ctcvr_logit_res = ctr_logit + cvr_logit + r_logit
+                            ctcvr_logit_res_list.append(ctcvr_logit_res.cpu())
 
                         # Collect p_ctcvr for health metrics
                         if log_health_metrics:
@@ -1058,6 +1097,7 @@ def validate(
         loss_ratio_scaled = float(mean_cvr_scaled / (mean_ctr_scaled + EPS))
 
     auc_ctr = auc_cvr = auc_ctcvr = auc_primary = None
+    auc_ctcvr_mul = auc_ctcvr_res = None  # Residual Head: 双版本 CTCVR AUC
     if calc_auc:
         auc_vals = []
         ctr_metrics = cvr_metrics = ctcvr_metrics = None
@@ -1084,6 +1124,22 @@ def validate(
                 torch.cat(y_ctcvr_list).numpy(), torch.cat(ctcvr_logit_list).numpy()
             )
             auc_ctcvr = ctcvr_metrics.get("auc")
+            # ctcvr_logit_list 始终是乘法版本 (p_ctr * p_cvr)
+            auc_ctcvr_mul = auc_ctcvr
+
+            # ============================================================
+            # Residual Head: 额外计算 residual 版本的 CTCVR AUC
+            # 用于对比乘法版本和残差修正版本的效果
+            # ============================================================
+            if residual_enabled and ctcvr_logit_res_list:
+                ctcvr_res_metrics = compute_binary_metrics(
+                    torch.cat(y_ctcvr_list).numpy(),
+                    torch.cat(ctcvr_logit_res_list).numpy(),
+                )
+                auc_ctcvr_res = ctcvr_res_metrics.get("auc")
+                # 当 residual 启用时, 主 CTCVR AUC 使用 residual 版本
+                if auc_ctcvr_res is not None:
+                    auc_ctcvr = auc_ctcvr_res
         if auc_vals:
             if use_esmm and auc_ctr is not None and auc_cvr is not None and auc_ctcvr is not None:
                 # ESMM mode: weighted combination
@@ -1188,6 +1244,8 @@ def validate(
         "auc_ctr": auc_ctr,
         "auc_cvr": auc_cvr,
         "auc_ctcvr": auc_ctcvr,
+        "auc_ctcvr_mul": auc_ctcvr_mul,  # 乘法版本 CTCVR AUC (基线对比)
+        "auc_ctcvr_res": auc_ctcvr_res,  # 残差修正版本 CTCVR AUC (residual head)
         "auc_primary": auc_primary,
         **health_metrics,
     }

@@ -10,6 +10,7 @@ from torch import nn
 from src.models.backbones.layers import MLP
 from src.models.heads import TaskHead
 from src.models.mtl.composer import MMoEInputComposer, build_composer_from_config
+from src.models.residual_head import build_residual_head
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,7 @@ class MMoE(nn.Module):
         per_head_add: Optional[Dict[str, Dict[str, bool]]] = None,
         head_priors: Optional[Dict[str, float]] = None,
         log_gates: bool = False,
+        esmm_residual_cfg: Optional[Dict] = None,
     ):
         super().__init__()
         self.backbone = backbone
@@ -243,6 +245,14 @@ class MMoE(nn.Module):
             if self.towers[task].out_proj.bias is not None:
                 nn.init.constant_(self.towers[task].out_proj.bias, bias_init)
 
+        # ============================================================
+        # ESMM Residual Head: 可选的 CTCVR logit 残差修正
+        # 输入为 CVR 分支的 MMoE 混合表征（进入 CVR tower 前）
+        # ============================================================
+        self._residual_cfg = esmm_residual_cfg or {}
+        self.residual_head = build_residual_head(in_dim, self._residual_cfg)
+        self._residual_stop_grad_input = bool(self._residual_cfg.get("stop_grad_input", False))
+
     def _get_head_add_cfg(self, task: str) -> Dict[str, bool]:
         task = task.lower()
         cfg = self.per_head_add.get(task)
@@ -314,6 +324,11 @@ class MMoE(nn.Module):
         # ============================================================
         gate_weights_for_reg: List[torch.Tensor] = []
 
+        # ============================================================
+        # Residual Head: 保存 CVR 分支 MMoE 混合表征, 用于残差修正
+        # ============================================================
+        cvr_mmoe_repr: Optional[torch.Tensor] = None
+
         for task, head in self.towers.items():
             if task not in self.enabled_heads:
                 continue
@@ -329,6 +344,11 @@ class MMoE(nn.Module):
                 gate_weights_dict[task] = gate_w.detach()
 
             task_h = _mix(gate_w)
+
+            # 捕获 CVR 分支的 MMoE 混合输出, 供 ResidualHead 使用
+            if task == "cvr" and self.residual_head is not None:
+                cvr_mmoe_repr = task_h
+
             task_logit = head(task_h)
 
             if self.use_legacy_pseudo_deepfm:
@@ -361,6 +381,17 @@ class MMoE(nn.Module):
                 }
 
         results["logit_parts_decomposable"] = logit_parts_decomposable
+
+        # ============================================================
+        # ESMM Residual Head: 计算残差 logit 并存入 results
+        # 仅当 residual_head 存在且 CVR 分支已激活时生效
+        # ============================================================
+        if self.residual_head is not None and cvr_mmoe_repr is not None:
+            # stop_grad_input: 若 True, 阻断 L_ctcvr 向 shared/MMoE 表征的梯度
+            # 默认 False, 允许 ctcvr loss 更新 shared/moe 表征
+            res_input = cvr_mmoe_repr.detach() if self._residual_stop_grad_input else cvr_mmoe_repr
+            r_logit = self.residual_head(res_input)  # [B, 1]
+            results["residual_logit"] = r_logit
 
         # Merge aux from backbone and add gate weights if logging is enabled
         aux = dict(out.get("aux", {})) if "aux" in out else {}

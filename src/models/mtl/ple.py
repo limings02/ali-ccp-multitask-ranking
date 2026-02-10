@@ -27,6 +27,7 @@ from torch import nn
 from src.models.backbones.layers import MLP
 from src.models.heads import TaskHead
 from src.models.mtl.composer import MMoEInputComposer, build_composer_from_config
+from src.models.residual_head import build_residual_head
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +222,7 @@ class PLE(nn.Module):
         per_head_add: Optional[Dict[str, Dict[str, bool]]] = None,
         head_priors: Optional[Dict[str, float]] = None,
         log_gates: bool = False,
+        esmm_residual_cfg: Optional[Dict] = None,
     ):
         super().__init__()
         self.backbone = backbone
@@ -408,6 +410,14 @@ class PLE(nn.Module):
             bias_init = float(torch.log(torch.tensor(prior / (1 - prior))))
             if self.towers[task].out_proj.bias is not None:
                 nn.init.constant_(self.towers[task].out_proj.bias, bias_init)
+
+        # ============================================================
+        # ESMM Residual Head: 可选的 CTCVR logit 残差修正
+        # 输入为 CVR 分支的 PLE 混合表征（进入 CVR tower 前）
+        # ============================================================
+        self._residual_cfg = esmm_residual_cfg or {}
+        self.residual_head = build_residual_head(in_dim, self._residual_cfg)
+        self._residual_stop_grad_input = bool(self._residual_cfg.get("stop_grad_input", False))
 
     # =========================================================================
     # Expert Building Methods (同构/异构专家构建)
@@ -720,6 +730,11 @@ class PLE(nn.Module):
         gate_weights_for_reg: List[torch.Tensor] = []
         gate_num_shared_list: List[int] = []  # 记录每个任务的 shared experts 数量（用于 shared_only scope）
 
+        # ============================================================
+        # Residual Head: 保存 CVR 分支 PLE 混合表征, 用于残差修正
+        # ============================================================
+        cvr_ple_repr: Optional[torch.Tensor] = None
+
         # ========== 计算当前 step 的 temperature/noise_std（支持 schedule）==========
         current_temp, current_noise = self._get_scheduled_gate_params()
 
@@ -761,6 +776,10 @@ class PLE(nn.Module):
             # bmm: [B, D, K] @ [B, K, 1] -> [B, D, 1] -> squeeze -> [B, D]
             mixed = torch.bmm(stacked, weights).squeeze(-1)
 
+            # 捕获 CVR 分支的 PLE 混合输出, 供 ResidualHead 使用
+            if task == "cvr" and self.residual_head is not None:
+                cvr_ple_repr = mixed
+
             # 通过 task head 获取 logit
             task_logit = head(mixed)
 
@@ -795,6 +814,15 @@ class PLE(nn.Module):
                 }
 
         results["logit_parts_decomposable"] = logit_parts_decomposable
+
+        # ============================================================
+        # ESMM Residual Head: 计算残差 logit 并存入 results
+        # 仅当 residual_head 存在且 CVR 分支已激活时生效
+        # ============================================================
+        if self.residual_head is not None and cvr_ple_repr is not None:
+            res_input = cvr_ple_repr.detach() if self._residual_stop_grad_input else cvr_ple_repr
+            r_logit = self.residual_head(res_input)  # [B, 1]
+            results["residual_logit"] = r_logit
 
         # ========== 合并 aux 并添加 gate 相关信息 ==========
         aux = dict(out.get("aux", {})) if "aux" in out else {}

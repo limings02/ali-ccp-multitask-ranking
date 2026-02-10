@@ -170,16 +170,19 @@ model:
     gate_stabilize:
       enabled: true
       eps: 1.0e-8
-      entropy_reg_weight: 2.0e-3
-      load_balance_kl_weight: 2.0e-3
+      entropy_reg_weight: 3.0e-4      # 熵正则：鼓励更均匀的路由
+      load_balance_kl_weight: 3.0e-4  # 负载均衡 KL 正则
       log_stats: true
+      # ---------- Temperature/Noise 退火 Schedule（任务4：可选）----------
+      # 支持线性退火：在 warmup 期间保持 start 值，然后线性衰减到 end 值
+      # enabled=false 时完全不生效（向后兼容）
       schedule:
-        enabled: true
-        warm_frac: 0.2
-        temperature_start: 1.5
-        temperature_end: 1.0
-        noise_std_start: 0.05
-        noise_std_end: 0.0
+        enabled: true  # 默认关闭
+        warm_frac: 0.2  # warmup 占总步数的比例，在此期间保持 start 值
+        temperature_start: 1.3  # 初始温度（较高更平滑）
+        temperature_end: 1.0    # 最终温度
+        noise_std_start: 0.05   # 初始噪声标准差
+        noise_std_end: 0.01      # 最终噪声（训练后期关闭噪声）
 
     gate_reg_scope: "shared_only"
 

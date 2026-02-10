@@ -178,7 +178,7 @@ runtime:
 - 若未安装 sklearn，AUC 字段为 null，程序不会报错 )```
 
 ```bash
-python -m src.cli.main eval --config runs/deepfm_ple_lite_dual_sparse_20260203_123206/config.yaml --ckpt runs/deepfm_ple_lite_dual_sparse_20260203_123206/ckpt_best.pt --split valid
+python -m src.cli.main eval --config runs\interview_chain\interview_E3_2_deepfm_mmoe_lightgate_stabilize_esmm_20260207_231517\config.yaml --ckpt runs\interview_chain\interview_E3_2_deepfm_mmoe_lightgate_stabilize_esmm_20260207_231517\ckpt_best.pt --split valid
 ```
 
 ## MMoE

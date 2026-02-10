@@ -127,6 +127,8 @@ def build_model(cfg: Dict[str, Any], feature_map: Dict[str, Any] | None = None, 
     if mtl == "mmoe":
         mmoe_cfg = model_cfg.get("mmoe", {})
         log_gates = bool(mmoe_cfg.get("log_gates", False))
+        # ESMM residual head 配置: 从 esmm.residual 读取
+        esmm_residual_cfg = cfg.get("esmm", {}).get("residual", {})
         return MMoE(
             backbone=backbone,
             head_cfg=head_cfg,
@@ -137,6 +139,7 @@ def build_model(cfg: Dict[str, Any], feature_map: Dict[str, Any] | None = None, 
             per_head_add=per_head_add,
             head_priors=label_priors,
             log_gates=log_gates,
+            esmm_residual_cfg=esmm_residual_cfg,
         )
 
     # ========== PLE-Lite 分支 ==========
@@ -144,6 +147,8 @@ def build_model(cfg: Dict[str, Any], feature_map: Dict[str, Any] | None = None, 
     if mtl == "ple":
         ple_cfg = model_cfg.get("ple", {})
         log_gates = bool(ple_cfg.get("log_gates", False))
+        # ESMM residual head 配置: 从 esmm.residual 读取
+        esmm_residual_cfg = cfg.get("esmm", {}).get("residual", {})
         return PLE(
             backbone=backbone,
             head_cfg=head_cfg,
@@ -154,6 +159,7 @@ def build_model(cfg: Dict[str, Any], feature_map: Dict[str, Any] | None = None, 
             per_head_add=per_head_add,
             head_priors=label_priors,
             log_gates=log_gates,
+            esmm_residual_cfg=esmm_residual_cfg,
         )
 
     raise ValueError(f"Unsupported model.mtl '{mtl}'. Expected 'sharedbottom', 'mmoe', or 'ple'.")

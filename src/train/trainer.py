@@ -247,6 +247,12 @@ class Trainer:
             # 负采样权重补偿
             neg_sample_weight_correction=bool(loss_cfg.get("neg_sample_weight_correction", False)),
             neg_keep_prob_train=self.neg_keep_prob_train,
+            # ESMM Residual Head 配置
+            residual_enabled=bool(cfg.get("esmm", {}).get("residual", {}).get("enabled", False)),
+            residual_res_reg_weight=float(cfg.get("esmm", {}).get("residual", {}).get("res_reg_weight", 5e-4)),
+            residual_anchor_enabled=bool(cfg.get("esmm", {}).get("residual", {}).get("anchor", {}).get("enabled", False)),
+            residual_anchor_weight=float(cfg.get("esmm", {}).get("residual", {}).get("anchor", {}).get("weight", 0.02)),
+            residual_anchor_eps=float(cfg.get("esmm", {}).get("residual", {}).get("anchor", {}).get("eps", 1e-6)),
             global_step=0,  # Will be updated in training loop
         )
 
@@ -292,6 +298,24 @@ class Trainer:
                     aux_focal_cfg.get("gamma", 1.0),
                     aux_focal_cfg.get("use_alpha", False),
                     aux_focal_cfg.get("alpha", 0.25),
+                )
+
+            # Log Residual Head configuration if enabled
+            residual_cfg = cfg.get("esmm", {}).get("residual", {})
+            if residual_cfg.get("enabled", False):
+                anchor_cfg = residual_cfg.get("anchor", {})
+                self.logger.info(
+                    "Residual Head config: enabled=true mlp_dims=%s dropout=%.2f "
+                    "use_layernorm=%s alpha=%.2f stop_grad_input=%s "
+                    "res_reg_weight=%.2e anchor_enabled=%s anchor_weight=%.3f",
+                    residual_cfg.get("mlp_dims", [64]),
+                    residual_cfg.get("dropout", 0.1),
+                    residual_cfg.get("use_layernorm", True),
+                    residual_cfg.get("alpha", 1.0),
+                    residual_cfg.get("stop_grad_input", False),
+                    residual_cfg.get("res_reg_weight", 5e-4),
+                    anchor_cfg.get("enabled", False),
+                    anchor_cfg.get("weight", 0.02),
                 )
 
         self.best_metric: float = float("-inf")  # tracks best full AUC (kept for legacy compatibility)
@@ -385,16 +409,34 @@ class Trainer:
 
     def run(self) -> None:
         runtime = self.cfg.get("runtime", {})
+        max_train_steps = runtime.get("max_train_steps")
+        if max_train_steps is None:
+            raise ValueError("max_train_steps must be specified in config")
+        
         epochs = int(runtime.get("epochs", 1))
         log_every = int(runtime.get("log_every", 50))
-        max_train_steps = runtime.get("max_train_steps")
         max_valid_steps = runtime.get("max_valid_steps")
         grad_clip_norm = runtime.get("grad_clip_norm")
         grad_diag_enabled = bool(runtime.get("grad_diag_enabled", False))
-        eval_every_steps = log_every  # compute full AUC at the same cadence as logging
+        eval_every_steps = log_every
         save_last = bool(runtime.get("save_last", True))
-
-        for epoch in range(1, epochs + 1):
+        
+        # 计算每个 epoch 的期望步数
+        epoch_steps = max_train_steps // epochs
+        
+        # 根据 global_step 计算起始 epoch（从 0 开始便于计算）
+        start_epoch = self.global_step // epoch_steps
+        
+        self.logger.info(f"Resuming training from global_step={self.global_step}, start_epoch={start_epoch + 1}/{epochs}")
+        
+        for epoch in range(start_epoch, epochs):
+            # 计算当前 epoch 的起始和结束步数
+            epoch_start_step = epoch * epoch_steps
+            epoch_end_step = (epoch + 1) * epoch_steps if epoch < epochs - 1 else max_train_steps
+            epoch_num = epoch + 1  # 用于日志，epoch 从 1 计数
+            
+            self.logger.info(f"Epoch {epoch_num}/{epochs}: global steps {epoch_start_step}-{epoch_end_step}")
+            
             def _validate_full():
                 return validate(
                     self.model,
@@ -402,7 +444,7 @@ class Trainer:
                     self.loss_fn,
                     self.device,
                     self.logger,
-                    epoch=epoch,
+                    epoch=epoch_num,
                     max_steps=max_valid_steps,
                     log_every=max(1, log_every * 4),
                     amp_enabled=self.amp_enabled,
@@ -466,8 +508,8 @@ class Trainer:
                 self.loss_fn,
                 self.device,
                 self.logger,
-                epoch=epoch,
-                max_steps=max_train_steps,
+                epoch=epoch_num,
+                max_steps=epoch_end_step,  # 限制该 epoch 的最大步数
                 grad_clip_norm=grad_clip_norm,
                 log_every=log_every,
                 global_step=self.global_step,
@@ -489,7 +531,7 @@ class Trainer:
                 conflict_ema_alpha=conflict_ema_alpha,
             )
             self.global_step += train_metrics.get("steps", 0)
-            train_record = {"epoch": epoch, "split": "train", **train_metrics}
+            train_record = {"epoch": epoch_num, "split": "train", **train_metrics}
             self._write_metrics(train_record)
 
             valid_metrics = validate(
@@ -498,7 +540,7 @@ class Trainer:
                 self.loss_fn,
                 self.device,
                 self.logger,
-                epoch=epoch,
+                epoch=epoch_num,
                 max_steps=max_valid_steps,
                 log_every=log_every * 4,
                 amp_enabled=self.amp_enabled,
@@ -507,12 +549,12 @@ class Trainer:
                 log_health_metrics=self.log_health_metrics,
                 expert_health_diag=self.expert_health_diag,
             )
-            valid_record = {"epoch": epoch, "split": "valid", **valid_metrics}
+            valid_record = {"epoch": epoch_num, "split": "valid", **valid_metrics}
             self._write_metrics(valid_record)
 
             # checkpointing
             # Prepare extra dict with lr_scheduler state
-            ckpt_extra = {"epoch": epoch}
+            ckpt_extra = {"epoch": epoch_num}
             if self.lr_scheduler_bundle.enabled:
                 ckpt_extra["lr_scheduler"] = self.lr_scheduler_bundle.state_dict()
             
@@ -539,7 +581,12 @@ class Trainer:
                         best_metric=self.best_metric,
                         extra={**ckpt_extra, "kind": "full"},
                     )
-                    self.logger.info(f"New best at epoch {epoch}: auc={self.best_metric:.4f}")
+                    self.logger.info(f"New best at epoch {epoch_num}: auc={self.best_metric:.4f}")
+            
+            # 检查是否达到总步数限制
+            if self.global_step >= max_train_steps:
+                self.logger.info(f"Reached max_train_steps={max_train_steps}, stopping training")
+                break
 
         self.logger.info("Training finished.")
         # Optional auto-eval after training completes

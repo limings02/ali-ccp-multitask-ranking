@@ -216,6 +216,12 @@ class MultiTaskBCELoss:
         # ===== 负采样权重补偿 =====
         neg_sample_weight_correction: bool = False,
         neg_keep_prob_train: float = 1.0,
+        # ===== ESMM Residual Head 配置 =====
+        residual_enabled: bool = False,
+        residual_res_reg_weight: float = 5e-4,
+        residual_anchor_enabled: bool = False,
+        residual_anchor_weight: float = 0.02,
+        residual_anchor_eps: float = 1e-6,
         # Global step tracker (will be updated externally by trainer)
         global_step: int = 0,
     ):
@@ -270,6 +276,16 @@ class MultiTaskBCELoss:
             self.neg_sample_weight = 1.0 / self.neg_keep_prob_train
         else:
             self.neg_sample_weight = 1.0
+
+        # ===== ESMM Residual Head 配置 =====
+        # 当 residual_enabled=True 时, 模型会在 outputs 中返回 "residual_logit"
+        # Loss 计算将使用 logit 空间加法来组合 CTCVR:
+        #   ctcvr_logit = detach(ctr_logit) + detach(cvr_logit) + r_logit
+        self.residual_enabled = bool(residual_enabled)
+        self.residual_res_reg_weight = float(residual_res_reg_weight)
+        self.residual_anchor_enabled = bool(residual_anchor_enabled)
+        self.residual_anchor_weight = float(residual_anchor_weight)
+        self.residual_anchor_eps = float(residual_anchor_eps)
         
         # Global step for warmup control (updated externally by trainer)
         self.global_step = int(global_step)
@@ -484,6 +500,15 @@ class MultiTaskBCELoss:
         
         loss_ctr = loss_ctr_bce.mean()
 
+        # ============================================================
+        # Residual head 变量预初始化 (在 v2/legacy 分支前)
+        # 仅 ESMM v2 + residual_enabled 时会被实际赋值
+        # ============================================================
+        residual_logit = None
+        loss_res_reg = zero()
+        loss_anchor = zero()
+        residual_metrics: Dict[str, float] = {}
+
         if self.esmm_version == "v2":
             # ============================================================
             # Standard ESMM: p_ctcvr = p_ctr * p_cvr
@@ -558,6 +583,115 @@ class MultiTaskBCELoss:
                 # Warmup phase or disabled: use only BCE
                 loss_ctcvr = loss_ctcvr_bce
             
+            # ============================================================
+            # ESMM Residual Head: logit 空间加法修正 CTCVR
+            # ctcvr_logit = detach(ctr_logit) + detach(cvr_logit) + r_logit
+            #
+            # 为什么 detach? 防止 L_ctcvr 反向更新 CTR/CVR head, 避免任务互相拖累.
+            # 残差 r_logit 由 ResidualHead 输出, 梯度只流过 residual head
+            # 和（可选的）shared/MMoE 表征.
+            # ============================================================
+            residual_logit = outputs.get("residual_logit") if self.residual_enabled else None
+            
+            if residual_logit is not None:
+                r_logit = residual_logit.float()  # [B, 1]
+                # 确保 shape 统一为 [B, 1]
+                if r_logit.dim() == 1:
+                    r_logit = r_logit.unsqueeze(-1)
+                
+                # logit 空间加法: detach CTR/CVR logit 以隔离梯度
+                ctr_logit_det = ctr_logit_f32.detach()
+                cvr_logit_det = cvr_logit_f32.detach()
+                # 将 [B] -> [B, 1] 以匹配 r_logit 的形状
+                if ctr_logit_det.dim() == 1:
+                    ctr_logit_det = ctr_logit_det.unsqueeze(-1)
+                if cvr_logit_det.dim() == 1:
+                    cvr_logit_det = cvr_logit_det.unsqueeze(-1)
+                
+                ctcvr_logit_res = ctr_logit_det + cvr_logit_det + r_logit  # [B, 1]
+                ctcvr_logit_res = ctcvr_logit_res.squeeze(-1)  # [B]
+                
+                # 用 residual 版本覆盖 CTCVR loss
+                # 注意: 这里直接用 logit 空间的 BCE, 而非 log-domain
+                loss_ctcvr_res_bce = F.binary_cross_entropy_with_logits(
+                    ctcvr_logit_res, y_ctcvr_f32, reduction="none",
+                )
+                if ctcvr_pw_effective != 1.0:
+                    weight = torch.where(
+                        y_ctcvr_f32 > 0.5,
+                        torch.tensor(ctcvr_pw_effective, device=ctcvr_logit_res.device, dtype=torch.float32),
+                        torch.tensor(1.0, device=ctcvr_logit_res.device, dtype=torch.float32),
+                    )
+                    loss_ctcvr_res_bce = loss_ctcvr_res_bce * weight
+                # 保留乘法版本的 loss 用于日志对比
+                loss_ctcvr_mul = loss_ctcvr  # 保持引用
+                # 替换为 residual 版本
+                loss_ctcvr = loss_ctcvr_res_bce.mean()
+                
+                # ============================================================
+                # Residual 正则: L_res_reg = mean(r_logit^2) * res_reg_weight
+                # 鼓励残差保持小幅度, 避免过度纠正
+                # ============================================================
+                r_logit_flat = r_logit.squeeze(-1)  # [B]
+                if self.residual_res_reg_weight > 0:
+                    loss_res_reg = (r_logit_flat ** 2).mean() * self.residual_res_reg_weight
+                
+                # ============================================================
+                # Anchor loss (可选): 让残差不偏离 ESMM 乘法太远
+                # L_anchor = MSE(ctcvr_logit_res, logit_mul) * anchor_weight
+                # ============================================================
+                if self.residual_anchor_enabled:
+                    eps_a = self.residual_anchor_eps
+                    p_mul = torch.sigmoid(ctr_logit_det.squeeze(-1)) * torch.sigmoid(cvr_logit_det.squeeze(-1))
+                    p_mul = torch.clamp(p_mul, min=eps_a, max=1.0 - eps_a)
+                    logit_mul = torch.log(p_mul) - torch.log(1.0 - p_mul)
+                    loss_anchor = F.mse_loss(ctcvr_logit_res, logit_mul) * self.residual_anchor_weight
+                
+                # ============================================================
+                # Residual 诊断指标 (训练/评估均输出)
+                # - residual_r_abs_mean: 平均绝对值, 反映修正幅度
+                # - residual_r_abs_p95: P95 绝对值, 检测异常大修正
+                # - residual_r_abs_max: 最大绝对值
+                # - corr_r_ctr / corr_r_cvr: 与 CTR/CVR logit 的皮尔逊相关
+                #   若相关性过高, 说明 residual 在重复 CTR/CVR 的工作
+                # ============================================================
+                r_abs = r_logit_flat.detach().abs()
+                residual_metrics["residual_r_abs_mean"] = float(r_abs.mean().item())
+                # P95: 用 quantile 计算
+                if r_abs.numel() > 1:
+                    residual_metrics["residual_r_abs_p95"] = float(
+                        torch.quantile(r_abs.float(), 0.95).item()
+                    )
+                else:
+                    residual_metrics["residual_r_abs_p95"] = float(r_abs.mean().item())
+                residual_metrics["residual_r_abs_max"] = float(r_abs.max().item())
+                
+                # 皮尔逊相关系数 (batch 内, 数值稳定版本)
+                def _pearson_corr(a: torch.Tensor, b: torch.Tensor) -> float:
+                    """Batch-level Pearson correlation, 数值稳定."""
+                    a = a.detach().float()
+                    b = b.detach().float()
+                    a_mean = a.mean()
+                    b_mean = b.mean()
+                    a_centered = a - a_mean
+                    b_centered = b - b_mean
+                    cov = (a_centered * b_centered).mean()
+                    std_a = a_centered.pow(2).mean().sqrt()
+                    std_b = b_centered.pow(2).mean().sqrt()
+                    denom = std_a * std_b + 1e-8  # 防除零
+                    return float((cov / denom).clamp(-1.0, 1.0).item())
+                
+                residual_metrics["corr_r_ctr"] = _pearson_corr(
+                    r_logit_flat, ctr_logit_f32.detach()
+                )
+                residual_metrics["corr_r_cvr"] = _pearson_corr(
+                    r_logit_flat, cvr_logit_f32.detach()
+                )
+                residual_metrics["loss_ctcvr_mul"] = float(loss_ctcvr_mul.detach().item())
+                residual_metrics["loss_res_reg"] = float(loss_res_reg.detach().item())
+                if self.residual_anchor_enabled:
+                    residual_metrics["loss_anchor"] = float(loss_anchor.detach().item())
+            
             # Probabilities for metrics (computed from log-domain)
             p_ctr = torch.sigmoid(ctr_logit_f32)
             p_cvr = torch.sigmoid(cvr_logit_f32)
@@ -619,6 +753,14 @@ class MultiTaskBCELoss:
             + self.lambda_ctcvr * loss_ctcvr 
             + self.lambda_cvr_aux * loss_cvr_aux
         )
+
+        # ============================================================
+        # Residual 附加 loss: reg + anchor (仅当 residual_logit 存在时)
+        # 这些 loss 权重已经在 residual_metrics 中记录,
+        # 不再使用 lambda_ 前缀, 直接加到 total loss
+        # ============================================================
+        if residual_logit is not None:
+            loss_total = loss_total + loss_res_reg + loss_anchor
 
         # ============================================================
         # Metrics for observability
@@ -684,6 +826,15 @@ class MultiTaskBCELoss:
                 # Warmup phase: only BCE, no focal yet
                 loss_dict["loss_ctcvr_bce"] = float(loss_ctcvr_bce.item()) if self.esmm_version == "v2" else None
                 loss_dict["loss_ctcvr_focal"] = 0.0
+        
+        # ===== Add residual head metrics =====
+        if self.residual_enabled and residual_metrics:
+            loss_dict["residual_enabled"] = True
+            loss_dict.update(residual_metrics)
+        elif self.residual_enabled:
+            # residual enabled in config but no residual_logit in outputs
+            # (should not happen, but be defensive)
+            loss_dict["residual_enabled"] = True
         
         return loss_total, loss_dict
 

@@ -1,33 +1,73 @@
+# ============================================================
+# 示例配置: PLE + ESMM Residual Head (Logit 残差修正)
+#
+# 在标准 ESMM (p_ctcvr = p_ctr * p_cvr) 基础上，
+# 引入 residual head 在 logit 空间做加法修正:
+#   ctcvr_logit = detach(ctr_logit) + detach(cvr_logit) + r_logit
+#
+# 用法:
+#   python -m src.cli.main train --config configs/experiments/ple_optim/ple_esmm_residual.yaml
+# ============================================================
 experiment:
-  name: gateall_hetero_ple
+  name: ple_esmm_residual
+
 use_esmm: true
 esmm:
   version: v2
   eps: 1.0e-08
   lambda_ctr: 1.0
-  lambda_ctcvr: 1.0
-  lambda_cvr_aux: 0.1
+  lambda_ctcvr: 2.0
+  lambda_cvr_aux: 0.2
+
+  # ============================================================
+  # ESMM Residual Head 配置
+  # enabled=false 时行为与标准 ESMM 完全一致（向后兼容）
+  # ============================================================
+  residual:
+    enabled: true                   # 开启 residual 修正
+    input: "mmoe_cvr"               # 输入来源: CVR 分支的 MMoE/PLE 输出
+    stop_grad_input: false          # false: 允许 ctcvr loss 更新 shared/moe 表征
+                                    # true: 阻断梯度，仅更新 residual head
+    mlp_dims: [64]                  # MLP 隐藏层维度, 可用 [128, 64] 加深
+    dropout: 0.1                    # MLP dropout
+    use_layernorm: true             # 输入侧 LayerNorm（推荐 true）
+    alpha: 1.0                      # tanh 限幅系数, r_logit ∈ [-alpha, +alpha]
+
+    # 显式 L2 正则: L_res_reg = mean(r_logit^2) * res_reg_weight
+    # 鼓励残差保持小幅修正，避免 residual 替代 ESMM 乘法
+    res_reg_weight: 5.0e-4
+
+    # Anchor loss（可选，默认关闭）
+    # 让 residual 修正后的 ctcvr_logit 不要偏离乘法版本太远
+    anchor:
+      enabled: false
+      weight: 0.02                  # MSE(ctcvr_logit, logit_mul) 的权重
+      eps: 1.0e-6
+
 data:
   metadata_path: data/processed/metadata.json
   batch_size: 1024
   num_workers: 4
   num_workers_valid: 2
-  prefetch_factor: 1
+  prefetch_factor: 2
   pin_memory: true
   persistent_workers: false
   drop_last: false
   debug: false
   seed: 20260127
   neg_keep_prob_train: 1.0
+
 sampling:
   negative_sampling: none
+
 embedding:
   default_embedding_dim: 8
   embedding_dim_overrides: {}
   mode: sum
   sparse_grad: true
+
 model:
-  name: gateall_hetero_ple
+  name: ple_esmm_residual
   mtl: ple
   enabled_heads:
   - ctr
@@ -128,34 +168,27 @@ model:
     gate_stabilize:
       enabled: true
       eps: 1.0e-08
-      entropy_reg_weight: 3.0e-4
-      load_balance_kl_weight: 3.0e-4
+      entropy_reg_weight: 6.0e-4
+      load_balance_kl_weight: 6.0e-4
       log_stats: true
       schedule:
         enabled: true
         warm_frac: 0.2
-        temperature_start: 1.2
+        temperature_start: 1.3
         temperature_end: 1.0
         noise_std_start: 0.05
         noise_std_end: 0.01
     gate_reg_scope: all
     gate_shared_mass_floor:
       enabled: false
-      per_task:
-        ctr:
-          min_mass: 0.5
-          weight: 0.001
-        cvr:
-          min_mass: 0.2
-          weight: 0.0005
     input: deep_h
-    # add_fm_vec: false
-    # add_emb: none
-    # part_proj_dim: null
-    # fusion: concat
-    # adapter_mlp_dims:
-    
-    # norm: layernorm
+    add_fm_vec: true
+    add_emb: mean
+    part_proj_dim: 128
+    fusion: concat
+    adapter_mlp_dims:
+    - 128
+    norm: layernorm
   log_gates: true
   heads:
     default:
@@ -166,7 +199,7 @@ model:
       activation: relu
     ctr: {}
     cvr: {}
-  deep_hidden_dims:  #在没有 backbone 版本时作为 fallback
+  deep_hidden_dims:
   - 256
   - 128
   deep_dropout: 0.2
@@ -175,6 +208,7 @@ model:
   fm_enabled: true
   fm_projection_dim: 16
   out_dim: 128
+
 optim:
   type: dual_sparse_dense
   dense:
@@ -199,38 +233,21 @@ optim:
     warmup_steps: 5000
     total_steps: 80000
     min_lr_ratio: 0.1
+
 loss:
   w_ctr: 1.0
   w_cvr: 1.0
   eps: 1.0e-06
-  pos_weight_dynamic: false
+  pos_weight_dynamic: true
   static_pos_weight:
     ctr: 1
     ctcvr: 1
   pos_weight_clip:
-    ctr: 10
-    ctcvr: 20
-  pos_weight_clip_schedule:
-    enabled: false
-    target: ctcvr
-    type: piecewise
-    milestones:
-    - 0
-    - 8000
-    values:
-    - 300
-    - 30
+    ctr: 8
+    ctcvr: 400
   aux_focal:
     enabled: false
-    warmup_steps: 8000
-    target_head: ctcvr
-    lambda: 0.05
-    gamma: 1.0
-    use_alpha: false
-    alpha: 0.25
-    detach_p_for_weight: true
-    compute_fp32: true
-    log_components: true
+
 runtime:
   device: cuda
   epochs: 2

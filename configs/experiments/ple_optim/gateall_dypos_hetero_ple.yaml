@@ -1,18 +1,40 @@
 experiment:
-  name: hetero_ple
+  name: gateall_dypos_hetero_ple
 use_esmm: true
 esmm:
   version: v2
   eps: 1.0e-08
   lambda_ctr: 1.0
-  lambda_ctcvr: 1.0
-  lambda_cvr_aux: 0.1
+  lambda_ctcvr: 2.0
+  lambda_cvr_aux: 0.2
+
+  residual:
+    enabled: false                   # 开启 residual 修正
+    input: "mmoe_cvr"               # 输入来源: CVR 分支的 MMoE/PLE 输出
+    stop_grad_input: true          # false: 允许 ctcvr loss 更新 shared/moe 表征
+                                    # true: 阻断梯度，仅更新 residual head
+    mlp_dims: [64]                  # MLP 隐藏层维度, 可用 [128, 64] 加深
+    dropout: 0.1                    # MLP dropout
+    use_layernorm: true             # 输入侧 LayerNorm（推荐 true）
+    alpha: 1.0                      # tanh 限幅系数, r_logit ∈ [-alpha, +alpha]
+
+    # 显式 L2 正则: L_res_reg = mean(r_logit^2) * res_reg_weight
+    # 鼓励残差保持小幅修正，避免 residual 替代 ESMM 乘法
+    res_reg_weight: 5.0e-4
+
+    # Anchor loss（可选，默认关闭）
+    # 让 residual 修正后的 ctcvr_logit 不要偏离乘法版本太远
+    anchor:
+      enabled: false
+      weight: 0.02                  # MSE(ctcvr_logit, logit_mul) 的权重
+      eps: 1.0e-6
+
 data:
   metadata_path: data/processed/metadata.json
   batch_size: 1024
   num_workers: 4
   num_workers_valid: 2
-  prefetch_factor: 1
+  prefetch_factor: 2
   pin_memory: true
   persistent_workers: false
   drop_last: false
@@ -24,10 +46,16 @@ sampling:
 embedding:
   default_embedding_dim: 8
   embedding_dim_overrides: {}
+embedding:
+  default_embedding_dim: 8
+  # embedding_dim_overrides:
+  #   user_id: 16      # user_id 特征用 16 维
+  #   item_id: 32      # item_id 特征用 32 维
+  #   category: 8      # 其他特征仍用默认的 8 维
   mode: sum
   sparse_grad: true
 model:
-  name: hetero_ple
+  name: gateall_dypos_hetero_ple
   mtl: ple
   enabled_heads:
   - ctr
@@ -128,17 +156,17 @@ model:
     gate_stabilize:
       enabled: true
       eps: 1.0e-08
-      entropy_reg_weight: 3.0e-4
-      load_balance_kl_weight: 3.0e-4
+      entropy_reg_weight: 8.0e-4
+      load_balance_kl_weight: 8.0e-4
       log_stats: true
       schedule:
         enabled: true
         warm_frac: 0.2
-        temperature_start: 1.2
+        temperature_start: 1.4
         temperature_end: 1.0
         noise_std_start: 0.05
         noise_std_end: 0.01
-    gate_reg_scope: shared_only
+    gate_reg_scope: all
     gate_shared_mass_floor:
       enabled: false
       per_task:
@@ -149,13 +177,13 @@ model:
           min_mass: 0.2
           weight: 0.0005
     input: deep_h
-    # add_fm_vec: false
-    # add_emb: none
-    # part_proj_dim: null
-    # fusion: concat
-    # adapter_mlp_dims:
-    
-    # norm: layernorm
+    add_fm_vec: true
+    add_emb: mean  # mean/sum/concat
+    part_proj_dim: 128 #要不要让各部分投影到统一的维度
+    fusion: concat #concat/sum
+    adapter_mlp_dims:
+    - 128
+    norm: layernorm
   log_gates: true
   heads:
     default:
@@ -203,13 +231,13 @@ loss:
   w_ctr: 1.0
   w_cvr: 1.0
   eps: 1.0e-06
-  pos_weight_dynamic: false
+  pos_weight_dynamic: true
   static_pos_weight:
     ctr: 1
     ctcvr: 1
   pos_weight_clip:
-    ctr: 10
-    ctcvr: 20
+    ctr: 8
+    ctcvr: 400
   pos_weight_clip_schedule:
     enabled: false
     target: ctcvr

@@ -38,7 +38,7 @@ data:
   batch_size: 1024                    # 公共锁定
   num_workers: 4
   num_workers_valid: 2
-  prefetch_factor: 1
+  prefetch_factor: 2
   pin_memory: true
   persistent_workers: false
   drop_last: false

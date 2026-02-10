@@ -163,6 +163,7 @@ def run_eval(
     ctr_logit_list = [] if use_ctr else None
     cvr_logit_list = [] if use_cvr else None
     ctcvr_logit_list = [] if use_cvr and use_esmm else None
+    ctcvr_logit_res_list = [] if use_cvr and use_esmm else None
     ctr_wide_logit_list = [] if use_ctr else None
     ctr_parts_list = [] if use_ctr else None
     logit_parts_decomposable = None
@@ -215,6 +216,14 @@ def run_eval(
                         p_ctcvr = torch.clamp(p_ctcvr, min=esmm_eps, max=1.0 - esmm_eps)
                         ctcvr_logit = torch.log(p_ctcvr / (1.0 - p_ctcvr))
                         ctcvr_logit_list.append(ctcvr_logit.cpu().numpy())
+                        # Residual CTCVR logit (logit-space additive)
+                        r_logit = outputs.get("residual_logit")
+                        if r_logit is not None and ctcvr_logit_res_list is not None:
+                            r_logit_flat = r_logit.view(-1) if r_logit.dim() > 1 else r_logit
+                            ctcvr_logit_res = (
+                                ctr_logit_for_joint + cvr_logit + r_logit_flat
+                            )
+                            ctcvr_logit_res_list.append(ctcvr_logit_res.cpu().numpy())
                     if y_ctcvr_list is not None and "y_ctcvr" in labels_dev:
                         y_ctcvr_list.append(labels_dev["y_ctcvr"].cpu().numpy())
 
@@ -235,6 +244,8 @@ def run_eval(
     ctr_logit_raw = np.concatenate(ctr_logit_list) if use_ctr and ctr_logit_list else np.array([])
     cvr_logit = np.concatenate(cvr_logit_list) if use_cvr and cvr_logit_list else np.array([])
     ctcvr_logit = np.concatenate(ctcvr_logit_list) if ctcvr_logit_list else None
+    ctcvr_logit_res = np.concatenate(ctcvr_logit_res_list) if ctcvr_logit_res_list else None
+    residual_available = ctcvr_logit_res is not None
     ctr_wide_logit_raw = np.concatenate(ctr_wide_logit_list) if ctr_wide_logit_list else np.array([])
 
     # Apply logit correction to CTR predictions (negative sampling affects CTR label distribution)
@@ -252,6 +263,12 @@ def run_eval(
             ctcvr_metrics = (
                 compute_binary_metrics(y_ctcvr, ctcvr_logit)
                 if (y_ctcvr is not None and ctcvr_logit is not None)
+                else empty_metrics
+            )
+            # Residual CTCVR metrics (dual-AUC)
+            ctcvr_metrics_res = (
+                compute_binary_metrics(y_ctcvr, ctcvr_logit_res)
+                if (y_ctcvr is not None and residual_available)
                 else empty_metrics
             )
         else:
@@ -364,7 +381,9 @@ def run_eval(
         "run_dir": str(resolved_run_dir),
         "ctr_auc": ctr_metrics["auc"] if use_ctr else None,
         "cvr_auc_masked": cvr_metrics_masked["auc"] if use_cvr else None,
-        "ctcvr_auc": ctcvr_metrics["auc"] if use_cvr and use_esmm else None,
+        "ctcvr_auc": ctcvr_metrics_res["auc"] if (use_cvr and use_esmm and residual_available) else (ctcvr_metrics["auc"] if use_cvr and use_esmm else None),
+        "ctcvr_auc_mul": ctcvr_metrics["auc"] if use_cvr and use_esmm else None,
+        "ctcvr_auc_res": ctcvr_metrics_res["auc"] if (use_cvr and use_esmm and residual_available) else None,
         "ctr_logloss": ctr_metrics["logloss"] if use_ctr else None,
         "cvr_logloss_masked": cvr_metrics_masked["logloss"] if use_cvr else None,
         "ctcvr_logloss": ctcvr_metrics["logloss"] if use_cvr and use_esmm else None,
@@ -408,7 +427,11 @@ def run_eval(
         log_parts.append(f"cvr_auc_masked={cvr_metrics_masked['auc']}")
         log_parts.append(f"cvr_logloss_masked={cvr_metrics_masked['logloss']}")
         if use_esmm:
-            log_parts.append(f"ctcvr_auc={ctcvr_metrics['auc']}")
+            if residual_available:
+                log_parts.append(f"ctcvr_auc_mul={ctcvr_metrics['auc']}")
+                log_parts.append(f"ctcvr_auc_res={ctcvr_metrics_res['auc']}")
+            else:
+                log_parts.append(f"ctcvr_auc={ctcvr_metrics['auc']}")
             log_parts.append(f"ctcvr_logloss={ctcvr_metrics['logloss']}")
             log_parts.append(f"auc_cvr_click={cvr_metrics_masked['auc']}")
             log_parts.append(f"n_exposure={result.get('n')}")
