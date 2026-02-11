@@ -31,18 +31,18 @@ PROJECT_ROOT = Path(__file__).parent.parent
 # 实验配置列表
 EXPERIMENTS = [
     {
-    "name": "mmoe",
-    "config": "configs\\experiments\\mmoe_optim\\midgate_mmoe.yaml",
+    "name": "classic_mmoe",
+    "config": "configs/experiments/mmoe_optim/test1_mmoe.yaml",
     "description": "mmoe)"
     },
     {
-        "name": "ple_optim/hetero_ple",
-        "config": "configs/experiments/ple_optim/gateall_dypos_hetero_ple.yaml",
+        "name": "focal_mmoe",
+        "config": "configs/experiments/mmoe_optim/test2_mmoe.yaml",
         "description": "PLE homo)"
     },
     {
-        "name": "ple_optim/gateall_hetero_ple",
-        "config": "configs/experiments/ple_optim/gateall_dypos_homo_ple.yaml",
+        "name": "classic_ple",
+        "config": "configs/experiments/ple_optim/base_homo_ple.yaml",
         "description": "PLE hetero"
     },
 ]

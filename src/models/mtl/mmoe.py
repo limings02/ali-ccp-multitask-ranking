@@ -50,13 +50,21 @@ class _Gate(nn.Module):
         else:
             raise ValueError(f"Unsupported gate_type: {gate_type}")
 
-    def forward(self, x: torch.Tensor, return_logits: bool = False) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, 
+        x: torch.Tensor, 
+        return_logits: bool = False,
+        temperature_override: Optional[float] = None,
+        noise_std_override: Optional[float] = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass with optional stabilization.
         
         Args:
             x: Input tensor [B, D]
             return_logits: If True, return (weights, logits) tuple
+            temperature_override: If provided, use this temperature instead of self.temperature
+            noise_std_override: If provided, use this noise_std instead of self.noise_std
             
         Returns:
             weights: Softmax weights [B, E]
@@ -64,14 +72,18 @@ class _Gate(nn.Module):
         """
         logits = self.net(x)
         
+        # 使用 override 或默认值
+        temperature = temperature_override if temperature_override is not None else self.temperature
+        noise_std = noise_std_override if noise_std_override is not None else self.noise_std
+        
         # Add noise during training (改动 C: gate stabilization)
-        if self.training and self.noise_std > 0:
-            noise = torch.randn_like(logits) * self.noise_std
+        if self.training and noise_std > 0:
+            noise = torch.randn_like(logits) * noise_std
             logits = logits + noise
         
         # Apply temperature scaling
-        if self.temperature != 1.0:
-            logits = logits / self.temperature
+        if temperature != 1.0:
+            logits = logits / temperature
         
         weights = torch.softmax(logits, dim=-1)
         
@@ -181,6 +193,27 @@ class MMoE(nn.Module):
         self.load_balance_kl_weight = float(gate_stabilize_cfg.get("load_balance_kl_weight", 0.0))
         self.gate_log_stats = bool(gate_stabilize_cfg.get("log_stats", True))
         self.num_experts = num_experts
+        
+        # ========== 新增：gate 温度/噪声退火 schedule ==========
+        # 支持线性退火：从 start 值线性衰减到 end 值
+        # enabled=false 时完全不生效（向后兼容）
+        schedule_cfg = gate_stabilize_cfg.get("schedule", {}) or {}
+        self.gate_schedule_enabled = bool(schedule_cfg.get("enabled", False))
+        if self.gate_schedule_enabled:
+            self.gate_schedule_warm_frac = float(schedule_cfg.get("warm_frac", 0.2))
+            self.gate_schedule_temp_start = float(schedule_cfg.get("temperature_start", self.gate_temperature))
+            self.gate_schedule_temp_end = float(schedule_cfg.get("temperature_end", 1.0))
+            self.gate_schedule_noise_start = float(schedule_cfg.get("noise_std_start", self.gate_noise_std))
+            self.gate_schedule_noise_end = float(schedule_cfg.get("noise_std_end", 0.0))
+            logger.info(
+                "[MMoE] gate_schedule enabled: warm_frac=%.2f temp(%.2f->%.2f) noise(%.3f->%.3f)",
+                self.gate_schedule_warm_frac,
+                self.gate_schedule_temp_start, self.gate_schedule_temp_end,
+                self.gate_schedule_noise_start, self.gate_schedule_noise_end,
+            )
+        # 用于外部设置当前 step（由 trainer 在每个 step 更新）
+        self._current_step: int = 0
+        self._total_steps: int = 1  # 防止除零
         
         if self.gate_stabilize_enabled:
             logger.info(
@@ -329,11 +362,14 @@ class MMoE(nn.Module):
         # ============================================================
         cvr_mmoe_repr: Optional[torch.Tensor] = None
 
+        # ========== 计算当前 step 的 temperature/noise_std（支持 schedule）==========
+        current_temp, current_noise = self._get_scheduled_gate_params()
+
         for task, head in self.towers.items():
             if task not in self.enabled_heads:
                 continue
             gate = self.gates[task]
-            gate_w = gate(base_x)  # [B, E]
+            gate_w = gate(base_x, temperature_override=current_temp, noise_std_override=current_noise)  # [B, E]
             
             # Store for regularization (keep gradient for training)
             if self.gate_stabilize_enabled and self.training:
@@ -470,6 +506,56 @@ class MMoE(nn.Module):
             gate_reg_loss = gate_reg_loss + self.load_balance_kl_weight * mean_kl
         
         return gate_reg_loss, mean_entropy, mean_kl
+    
+    def _get_scheduled_gate_params(self) -> tuple[Optional[float], Optional[float]]:
+        """
+        获取当前 step 的 temperature 和 noise_std（支持线性退火 schedule）。
+        
+        如果 gate_schedule_enabled=False，返回 (None, None)，
+        Gate 将使用其默认的 self.temperature 和 self.noise_std。
+        
+        Returns:
+            (current_temp, current_noise): 当前 step 应使用的 temperature 和 noise_std
+                                           如果 schedule 未启用则返回 (None, None)
+        """
+        if not self.gate_schedule_enabled:
+            return None, None
+        
+        # 计算当前进度 [0, 1]
+        progress = min(1.0, self._current_step / max(1, self._total_steps))
+        
+        # warmup 阶段保持 start 值
+        warm_frac = self.gate_schedule_warm_frac
+        if progress < warm_frac:
+            # 在 warmup 期间保持 start 值
+            current_temp = self.gate_schedule_temp_start
+            current_noise = self.gate_schedule_noise_start
+        else:
+            # warmup 后线性退火到 end 值
+            decay_progress = (progress - warm_frac) / (1.0 - warm_frac + 1e-8)
+            decay_progress = min(1.0, max(0.0, decay_progress))
+            
+            current_temp = self.gate_schedule_temp_start + decay_progress * (
+                self.gate_schedule_temp_end - self.gate_schedule_temp_start
+            )
+            current_noise = self.gate_schedule_noise_start + decay_progress * (
+                self.gate_schedule_noise_end - self.gate_schedule_noise_start
+            )
+        
+        return current_temp, current_noise
+
+    def set_step(self, current_step: int, total_steps: int) -> None:
+        """
+        设置当前训练 step（由 trainer 在每个 step 调用）。
+        
+        用于 gate temperature/noise_std 的 schedule 计算。
+        
+        Args:
+            current_step: 当前全局 step（从 0 开始）
+            total_steps: 总训练 step 数
+        """
+        self._current_step = current_step
+        self._total_steps = max(1, total_steps)
     
     def get_expert_health_data(self) -> Dict[str, Any]:
         """

@@ -147,27 +147,34 @@ class Trainer:
             self.negative_sampling,
             self.neg_keep_prob_train,
         )
+        data_cfg = cfg.get("data", {})
+        train_workers = int(data_cfg.get("num_workers", 0))
+        valid_workers = int(data_cfg.get("num_workers_valid", max(1, train_workers // 2)))
+        prefetch_cfg = data_cfg.get("prefetch_factor")
+        train_prefetch = int(prefetch_cfg) if prefetch_cfg is not None else None
+        valid_prefetch = int(prefetch_cfg) if (prefetch_cfg is not None and valid_workers > 0) else None
+        worker_cpu_threads = int(data_cfg.get("worker_cpu_threads", 1))
+        persistent_cfg = data_cfg.get("persistent_workers")
+        train_persistent = bool(persistent_cfg) if persistent_cfg is not None else (train_workers > 0)
+        valid_persistent = bool(persistent_cfg) if persistent_cfg is not None else (valid_workers > 0)
 
         self.train_loader = make_dataloader(
             split="train",
             batch_size=int(cfg["data"]["batch_size"]),
-            num_workers=int(cfg["data"].get("num_workers", 0)),
+            num_workers=train_workers,
             shuffle=False,
             drop_last=bool(cfg["data"].get("drop_last", False)),
             pin_memory=bool(cfg["data"].get("pin_memory", True)),
-            persistent_workers=bool(cfg["data"].get("persistent_workers", False)),
+            persistent_workers=train_persistent,
             seed=cfg["data"].get("seed"),
             feature_meta=self.feature_meta,
             debug=bool(cfg["data"].get("debug", False) or self.debug_dataloader_assert),
             neg_keep_prob_train=self.neg_keep_prob_train,
-            prefetch_factor=int(cfg["data"].get("prefetch_factor", 2)),
+            prefetch_factor=train_prefetch,
+            worker_cpu_threads=worker_cpu_threads,
         )
         # Use separate num_workers for validation to avoid memory issues
         # Default to half of train workers or max 2 to prevent OOM with persistent_workers
-        train_workers = int(cfg["data"].get("num_workers", 0))
-        valid_workers = int(cfg["data"].get("num_workers_valid", max(1, train_workers // 2)))
-        # Only set prefetch_factor if num_workers > 0 (required by PyTorch DataLoader)
-        valid_prefetch = int(cfg["data"].get("prefetch_factor", 2)) if valid_workers > 0 else None
         self.valid_loader = make_dataloader(
             split="valid",
             batch_size=int(cfg["data"]["batch_size"]),
@@ -175,11 +182,12 @@ class Trainer:
             shuffle=False,
             drop_last=False,
             pin_memory=bool(cfg["data"].get("pin_memory", True)),
-            persistent_workers=bool(cfg["data"].get("persistent_workers", False)),
+            persistent_workers=valid_persistent,
             seed=cfg["data"].get("seed"),
             feature_meta=self.feature_meta,
             debug=bool(cfg["data"].get("debug", False) or self.debug_dataloader_assert),
             prefetch_factor=valid_prefetch,
+            worker_cpu_threads=worker_cpu_threads,
         )
 
         self.model = build_model(cfg).to(self.device)

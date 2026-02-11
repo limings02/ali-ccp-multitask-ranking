@@ -53,11 +53,15 @@ def main() -> None:
         shuffle=False,
         drop_last=bool(_get_cfg(data_cfg, "drop_last", False)),
         pin_memory=bool(_get_cfg(data_cfg, "pin_memory", True)),
-        persistent_workers=bool(_get_cfg(data_cfg, "persistent_workers", False)),
+        persistent_workers=bool(
+            data_cfg["persistent_workers"] if "persistent_workers" in data_cfg else int(_get_cfg(data_cfg, "num_workers", 0)) > 0
+        ),
         seed=data_cfg.get("seed"),
         feature_meta=feature_meta,
         debug=bool(_get_cfg(data_cfg, "debug", False)),
         neg_keep_prob_train=float(_get_cfg(data_cfg, "neg_keep_prob_train", 1.0)),
+        prefetch_factor=(int(data_cfg["prefetch_factor"]) if "prefetch_factor" in data_cfg else None),
+        worker_cpu_threads=int(_get_cfg(data_cfg, "worker_cpu_threads", 1)),
     )
 
     model = DeepFMBackbone(

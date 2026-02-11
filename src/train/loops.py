@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Callable, TYPE_CH
 
 import torch
 import torch.nn.functional as F
+from torch.autograd.profiler import record_function
 from torch.nn.utils import clip_grad_norm_
 from torch import amp as torch_amp
 from src.eval.metrics import compute_binary_metrics
@@ -25,20 +26,32 @@ EPS = 1e-12
 _diag_logger = logging.getLogger(__name__)
 
 
-def _to_device_labels(labels: Dict[str, torch.Tensor], device: torch.device) -> Dict[str, torch.Tensor]:
-    return {k: v.to(device) for k, v in labels.items()}
+def _to_device_labels(
+    labels: Dict[str, torch.Tensor],
+    device: torch.device,
+    non_blocking: bool = False,
+) -> Dict[str, torch.Tensor]:
+    return {k: v.to(device, non_blocking=non_blocking) for k, v in labels.items()}
 
 
-def _to_device_features(features: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
+def _to_device_features(
+    features: Dict[str, Any],
+    device: torch.device,
+    non_blocking: bool = False,
+) -> Dict[str, Any]:
     """
     Move indices/offsets/weights to target device; keep structure identical.
     """
     fields = {}
     for base, fd in features["fields"].items():
         fields[base] = {
-            "indices": fd["indices"].to(device),
-            "offsets": fd["offsets"].to(device),
-            "weights": fd["weights"].to(device) if fd.get("weights") is not None else None,
+            "indices": fd["indices"].to(device, non_blocking=non_blocking),
+            "offsets": fd["offsets"].to(device, non_blocking=non_blocking),
+            "weights": (
+                fd["weights"].to(device, non_blocking=non_blocking)
+                if fd.get("weights") is not None
+                else None
+            ),
         }
     return {"fields": fields, "field_names": features["field_names"]}
 
@@ -262,13 +275,26 @@ def train_one_epoch(
     forward_time = 0.0
     backward_time = 0.0
     optim_time = 0.0
+    next_batch_time = 0.0
+    collate_time = 0.0
+    h2d_time = 0.0
+    train_step_time = 0.0
+    h2d_non_blocking = bool(device.type == "cuda" and getattr(loader, "pin_memory", False))
 
     t_start = time.time()
-    t_batch_start = time.time()
+    t_batch_start = time.perf_counter()
 
     for step, (labels, features, meta) in enumerate(loader):
-        t_data_end = time.time()
-        data_load_time += t_data_end - t_batch_start
+        t_data_end = time.perf_counter()
+        t_next_batch = t_data_end - t_batch_start
+        data_load_time += t_next_batch
+        next_batch_time += t_next_batch
+        meta_perf = meta.get("_perf") if isinstance(meta, dict) else None
+        if isinstance(meta_perf, dict):
+            collate_ms = meta_perf.get("collate_ms")
+            if collate_ms is not None:
+                collate_time += float(collate_ms) / 1000.0
+        t_step_start = time.perf_counter()
         
         # Update global_step in loss_fn for aux_focal warmup control
         current_global_step = global_step + step
@@ -290,8 +316,11 @@ def train_one_epoch(
             if total_steps > 0:
                 model.set_step(current_global_step, total_steps)
 
-        labels = _to_device_labels(labels, device)
-        features_dev = _to_device_features(features, device)
+        with record_function("train.h2d_copy"):
+            t_h2d_start = time.perf_counter()
+            labels = _to_device_labels(labels, device, non_blocking=h2d_non_blocking)
+            features_dev = _to_device_features(features, device, non_blocking=h2d_non_blocking)
+            h2d_time += time.perf_counter() - t_h2d_start
 
         optimizer_bundle.zero_grad(set_to_none=True)
         # Autocast only on CUDA to avoid CPU precision issues.
@@ -561,7 +590,8 @@ def train_one_epoch(
         steps += 1
         
         # Reset batch timer for next iteration
-        t_batch_start = time.time()
+        train_step_time += time.perf_counter() - t_step_start
+        t_batch_start = time.perf_counter()
 
         # ============================================================
         # Gradient Conflict Sampling (auto-interval to reach target)
@@ -584,9 +614,10 @@ def train_one_epoch(
                 with torch_amp.autocast(enabled=False, device_type=amp_device_type):
                     diag_outputs = model(features_dev)
 
-                    # Build per-task losses for gradient computation
-                    # CTR loss: full batch
-                    loss_ctr_diag = F.binary_cross_entropy_with_logits(
+                    # Build per-task losses for gradient computation.
+                    # Use the same task weights as training loss so grad diagnostics
+                    # are sensitive to lambda/weight changes.
+                    loss_ctr_diag_raw = F.binary_cross_entropy_with_logits(
                         diag_outputs["ctr"].float(), labels["y_ctr"].float(), reduction="mean"
                     )
 
@@ -596,7 +627,14 @@ def train_one_epoch(
                         log_p_cvr = F.logsigmoid(diag_outputs["cvr"].float())
                         log_p_ctcvr = log_p_ctr + log_p_cvr
                         y_ctcvr = labels["y_ctcvr"].float()
-                        loss_ctcvr_diag = -(y_ctcvr * log_p_ctcvr + (1 - y_ctcvr) * torch.log1p(-torch.exp(log_p_ctcvr).clamp(max=1-1e-7))).mean()
+                        loss_ctcvr_diag_raw = -(
+                            y_ctcvr * log_p_ctcvr
+                            + (1 - y_ctcvr) * torch.log1p(-torch.exp(log_p_ctcvr).clamp(max=1 - 1e-7))
+                        ).mean()
+                        lambda_ctr_diag = float(getattr(loss_fn, "lambda_ctr", 1.0))
+                        lambda_ctcvr_diag = float(getattr(loss_fn, "lambda_ctcvr", 1.0))
+                        loss_ctr_diag = lambda_ctr_diag * loss_ctr_diag_raw
+                        loss_ctcvr_diag = lambda_ctcvr_diag * loss_ctcvr_diag_raw
                         losses_by_task = {"ctr": loss_ctr_diag, "ctcvr": loss_ctcvr_diag}
                     else:
                         mask = labels["click_mask"].float()
@@ -605,9 +643,13 @@ def train_one_epoch(
                             loss_vec = F.binary_cross_entropy_with_logits(
                                 diag_outputs["cvr"].float(), labels["y_cvr"].float(), reduction="none"
                             )
-                            loss_cvr_diag = (loss_vec * mask).sum() / (mask_sum + EPS)
+                            loss_cvr_diag_raw = (loss_vec * mask).sum() / (mask_sum + EPS)
                         else:
-                            loss_cvr_diag = torch.tensor(0.0, device=device, requires_grad=True)
+                            loss_cvr_diag_raw = torch.tensor(0.0, device=device, requires_grad=True)
+                        w_ctr_diag = float(getattr(loss_fn, "w_ctr", 1.0))
+                        w_cvr_diag = float(getattr(loss_fn, "w_cvr", 1.0))
+                        loss_ctr_diag = w_ctr_diag * loss_ctr_diag_raw
+                        loss_cvr_diag = w_cvr_diag * loss_cvr_diag_raw
                         losses_by_task = {"ctr": loss_ctr_diag, "cvr": loss_cvr_diag}
 
                 # Compute gradient metrics
@@ -757,11 +799,15 @@ def train_one_epoch(
             log_parts.append(f"samples={n_rows} steps/s={steps_per_sec:.2f} samples/s={samples_per_sec:.1f}")
             log_parts.append(f"time={elapsed:.2f}s")
             log_parts.append(f"timing(data={data_load_time:.1f}s[{data_pct:.0f}%] fwd={forward_time:.1f}s[{forward_pct:.0f}%] bwd={backward_time:.1f}s[{backward_pct:.0f}%] opt={optim_time:.1f}s[{optim_pct:.0f}%])")
+            log_parts.append(
+                f"timing_ext(next_batch={next_batch_time:.1f}s collate={collate_time:.1f}s h2d={h2d_time:.1f}s train_step={train_step_time:.1f}s)"
+            )
             
             logger.info(" ".join(log_parts))
             
             # Reset timing counters after logging
             data_load_time = forward_time = backward_time = optim_time = 0.0
+            next_batch_time = collate_time = h2d_time = train_step_time = 0.0
 
         if eval_every_steps and validate_fn and (current_global_step > 0 and current_global_step % eval_every_steps == 0):
             # Mid-epoch validation at the same cadence as training logs.
@@ -959,14 +1005,15 @@ def validate(
     # ============================================================
     ctcvr_logit_res_list: List[torch.Tensor] = []
     residual_enabled = bool(getattr(loss_fn, "residual_enabled", False))
+    h2d_non_blocking = bool(device.type == "cuda" and getattr(loader, "pin_memory", False))
 
     with torch.no_grad():
         for step, (labels, features, meta) in enumerate(loader):
             if max_steps is not None and step >= max_steps:
                 break
 
-            labels = _to_device_labels(labels, device)
-            features_dev = _to_device_features(features, device)
+            labels = _to_device_labels(labels, device, non_blocking=h2d_non_blocking)
+            features_dev = _to_device_features(features, device, non_blocking=h2d_non_blocking)
 
             with torch_amp.autocast(device_type=amp_device_type, enabled=amp_enabled, dtype=amp_dtype):
                 outputs = model(features_dev)

@@ -71,9 +71,11 @@ class EmbeddingBagEncoder(nn.Module):
         weights: torch.Tensor | None = None,
     ) -> torch.Tensor:
         device = self.embedding.weight.device
-        idx = indices.to(device)
-        off = offsets.to(device)
-        wts = weights.to(device) if weights is not None else None
+        idx = indices if indices.device == device else indices.to(device, non_blocking=True)
+        off = offsets if offsets.device == device else offsets.to(device, non_blocking=True)
+        wts = None
+        if weights is not None:
+            wts = weights if weights.device == device else weights.to(device, non_blocking=True)
         return self.embedding(idx, off, per_sample_weights=wts)
 
 

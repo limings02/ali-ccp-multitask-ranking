@@ -36,8 +36,15 @@ logger = logging.getLogger(__name__)
 class UtilizationConfig:
     """专家利用率诊断配置"""
     enabled: bool = True
-    dead_threshold: float = 0.01      # top1_share < 1% 认定为死亡
-    monopoly_threshold: float = 0.8   # top1_share > 80% 认定为垄断
+    dead_mean_threshold: float = 0.01       # mean_weight < 1% 认定 soft-dead
+    dead_p95_threshold: float = 0.01        # 可选更严格：p95 < 1%
+    dead_require_p95: bool = False          # True: dead 需同时满足 mean+p95
+    rank_dom_top1_threshold: float = 0.95   # top1_share > 95% 才考虑 rank dominance
+    rank_dom_uniform_eps: float = 0.03      # |mean_weight - 1/K| < eps 视为近均匀
+    rank_dom_std_eps: float = 0.02          # std(mean_weight) < eps 视为整体近均匀
+    monopoly_top1_threshold: float = 0.95   # top1_share > 95%
+    monopoly_mean_threshold: Optional[float] = None
+    # None 时按 K 动态计算: max(0.5, 1/K + 0.2)
     compute_gini: bool = True
 
 
@@ -94,11 +101,18 @@ class ExpertHealthDiagConfig:
         if not cfg:
             return cls(enabled=False)
         
+        util_cfg = dict(cfg.get("utilization", {}))
+        # Backward compatibility for old config keys.
+        if "dead_threshold" in util_cfg and "dead_mean_threshold" not in util_cfg:
+            util_cfg["dead_mean_threshold"] = util_cfg.pop("dead_threshold")
+        if "monopoly_threshold" in util_cfg and "monopoly_top1_threshold" not in util_cfg:
+            util_cfg["monopoly_top1_threshold"] = util_cfg.pop("monopoly_threshold")
+        
         return cls(
             enabled=cfg.get("enabled", True),
             log_interval=cfg.get("log_interval", 1000),
             log_on_valid=cfg.get("log_on_valid", True),
-            utilization=UtilizationConfig(**cfg.get("utilization", {})),
+            utilization=UtilizationConfig(**util_cfg),
             output_stats=OutputStatsConfig(**cfg.get("output_stats", {})),
             gradient=GradientConfig(**cfg.get("gradient", {})),
             type_specialization=TypeSpecializationConfig(**cfg.get("type_specialization", {})),
@@ -175,21 +189,75 @@ def compute_expert_utilization(
     }
     metrics["expert_top1_share"] = expert_top1_share
     
-    # 死亡专家检测
-    dead_experts = [
-        name for name, share in expert_top1_share.items()
-        if share < config.dead_threshold
-    ]
+    # 平均权重
+    mean_weights = gate_w_f32.mean(dim=0).cpu().numpy()
+    expert_mean_weight = {
+        name: float(mean_weights[i]) for i, name in enumerate(expert_names)
+    }
+    metrics["expert_mean_weight"] = expert_mean_weight
+    
+    # Per-expert p95 权重（soft routing 使用强度）
+    if gate_w_f32.size(0) > 0:
+        p95_weights = torch.quantile(
+            gate_w_f32,
+            torch.tensor(0.95, device=gate_w_f32.device, dtype=gate_w_f32.dtype),
+            dim=0,
+        ).cpu().numpy()
+    else:
+        p95_weights = np.zeros_like(mean_weights)
+    expert_weight_p95 = {
+        name: float(p95_weights[i]) for i, name in enumerate(expert_names)
+    }
+    metrics["expert_weight_p95"] = expert_weight_p95
+    
+    # 死亡专家检测（soft-dead）：基于 mean_weight，可选叠加 p95 条件
+    dead_by_mean = {
+        name for name, w in expert_mean_weight.items()
+        if w < config.dead_mean_threshold
+    }
+    dead_by_p95 = {
+        name for name, w in expert_weight_p95.items()
+        if w < config.dead_p95_threshold
+    }
+    if config.dead_require_p95:
+        dead_experts = sorted(dead_by_mean & dead_by_p95)
+    else:
+        dead_experts = sorted(dead_by_mean)
     metrics["dead_experts"] = dead_experts
     metrics["dead_expert_count"] = len(dead_experts)
+    metrics["dead_experts_by_mean"] = sorted(dead_by_mean)
+    metrics["dead_experts_by_p95"] = sorted(dead_by_p95)
     
-    # 垄断专家检测
+    # 垄断专家检测：top1_share + mean_weight 双条件
+    monopoly_mean_th = (
+        config.monopoly_mean_threshold
+        if config.monopoly_mean_threshold is not None
+        else max(0.5, 1.0 / max(K, 1) + 0.2)
+    )
     monopoly_experts = [
-        name for name, share in expert_top1_share.items()
-        if share > config.monopoly_threshold
+        name
+        for i, name in enumerate(expert_names)
+        if top1_share[i] > config.monopoly_top1_threshold and mean_weights[i] > monopoly_mean_th
     ]
     metrics["monopoly_experts"] = monopoly_experts
     metrics["monopoly_expert_count"] = len(monopoly_experts)
+    metrics["monopoly_mean_threshold_used"] = float(monopoly_mean_th)
+    
+    # Rank dominance: top1 极端，但 mean_weight 仍接近均匀（argmax 近似并列造成）
+    uniform_mean = 1.0 / max(K, 1)
+    mean_weight_std = float(np.std(mean_weights)) if K > 0 else 0.0
+    near_uniform_global = mean_weight_std < config.rank_dom_std_eps
+    rank_dominant_experts = []
+    for i, name in enumerate(expert_names):
+        if top1_share[i] <= config.rank_dom_top1_threshold:
+            continue
+        near_uniform_local = abs(mean_weights[i] - uniform_mean) < config.rank_dom_uniform_eps
+        if near_uniform_local or near_uniform_global:
+            rank_dominant_experts.append(name)
+    metrics["rank_dominant_experts"] = rank_dominant_experts
+    metrics["rank_dominant_count"] = len(rank_dominant_experts)
+    metrics["rank_dominance_alert"] = len(rank_dominant_experts) > 0
+    metrics["mean_weight_std"] = mean_weight_std
     
     # Gini 系数
     if config.compute_gini:
@@ -197,13 +265,6 @@ def compute_expert_utilization(
         metrics["gini_coefficient"] = gini
         # Gini > 0.5 表示明显的负载不均衡
         metrics["load_imbalance_alert"] = gini > 0.5
-    
-    # 平均权重
-    mean_weights = gate_w_f32.mean(dim=0).cpu().numpy()
-    expert_mean_weight = {
-        name: float(mean_weights[i]) for i, name in enumerate(expert_names)
-    }
-    metrics["expert_mean_weight"] = expert_mean_weight
     
     return metrics
 
@@ -700,14 +761,25 @@ class ExpertHealthDiagnostics:
             if "dead_expert_count" in value and value["dead_expert_count"] > 0:
                 alerts["has_alert"] = True
                 alerts["summary"].append(
-                    f"{key}: {value['dead_expert_count']} dead experts ({value.get('dead_experts', [])})"
+                    f"{key}: {value['dead_expert_count']} dead experts "
+                    f"(soft-dead by mean_weight/p95, {value.get('dead_experts', [])})"
                 )
             
             # 垄断专家
             if "monopoly_expert_count" in value and value["monopoly_expert_count"] > 0:
                 alerts["has_alert"] = True
                 alerts["summary"].append(
-                    f"{key}: {value['monopoly_expert_count']} monopoly experts ({value.get('monopoly_experts', [])})"
+                    f"{key}: {value['monopoly_expert_count']} monopoly experts "
+                    f"(by top1_share+mean_weight, {value.get('monopoly_experts', [])})"
+                )
+            
+            # Rank dominance（解释 top1 极端但权重仍近均匀）
+            if "rank_dominant_count" in value and value["rank_dominant_count"] > 0:
+                alerts["has_alert"] = True
+                alerts["summary"].append(
+                    f"{key}: {value['rank_dominant_count']} rank-dominant experts "
+                    f"({value.get('rank_dominant_experts', [])}); top1 extreme but mean_weight near-uniform "
+                    f"(likely argmax tie/near-tie)"
                 )
             
             # 负载不均衡

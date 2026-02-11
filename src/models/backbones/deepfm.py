@@ -153,13 +153,16 @@ class DeepFMBackbone(nn.Module):
             assert offsets.dtype == torch.int64, f"{base}: offsets dtype must be int64"
             if wts is not None:
                 assert wts.dtype == torch.float32, f"{base}: weights dtype must be float32"
-                wts = wts.to(device)
+                if wts.device != device:
+                    wts = wts.to(device, non_blocking=True)
 
             if int(offsets.shape[0]) != B:
                 raise ValueError(f"{base}: offsets length {offsets.shape[0]} != batch size {B}")
 
-            idx = idx.to(device)
-            offsets = offsets.to(device)
+            if idx.device != device:
+                idx = idx.to(device, non_blocking=True)
+            if offsets.device != device:
+                offsets = offsets.to(device, non_blocking=True)
 
             bag_out = self.linear_bags[base](idx, offsets, per_sample_weights=wts)
             # Normalize by bag length to avoid length-driven magnitude explosion while keeping mode='sum' for weights support.

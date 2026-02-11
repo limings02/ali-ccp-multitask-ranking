@@ -1,5 +1,5 @@
 experiment:
-  name: "base_mmoe"
+  name: "focal_mmoe"
 
 # =============================================================================
 # 实验说明（配置级）
@@ -53,7 +53,7 @@ esmm:
 data:
   # metadata 中包含 feature_meta / rows / total_num_embeddings
   metadata_path: "data/processed/metadata.json"
-  batch_size: 1024
+  batch_size: 2048
   num_workers: 4
   # valid 独立 worker 配置，避免与 train 同配导致内存压力
   num_workers_valid: 2
@@ -176,10 +176,7 @@ model:
       use_bn: false
       activation: "relu"
     ctr: {}
-    cvr: {}    # CVR 任务特定配置
-      # mlp_dims: [256, 128]  # 更深的网络
-      # dropout: 0.15         # 更高的 dropout
-      # activation: relu
+    cvr: {}
   
 # ============================================================================
 # Optimizer
@@ -240,7 +237,7 @@ loss:
     values: [300, 30]
   # CTCVR 辅助 focal（仅 ESMM v2 且 warmup 后生效）
   aux_focal:
-    enabled: false
+    enabled: true
     warmup_steps: 8000
     target_head: "ctcvr"
     lambda: 0.05

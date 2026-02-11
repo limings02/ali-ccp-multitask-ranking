@@ -68,8 +68,8 @@ model:
     return_logit_parts: true
     per_head_add:
       ctr:
-        use_wide: true
-        use_fm: true
+        use_wide: false
+        use_fm: false
       cvr:
         use_wide: false
         use_fm: false
