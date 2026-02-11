@@ -1,12 +1,12 @@
 experiment:
-  name: gateall_dypos_hetero_ple
+  name: gateall_dypos_homo_ple
 use_esmm: true
 esmm:
   version: v2
   eps: 1.0e-08
   lambda_ctr: 1.0
-  lambda_ctcvr: 2.0
-  lambda_cvr_aux: 0.2
+  lambda_ctcvr: 5
+  lambda_cvr_aux: 0.3
 
   residual:
     enabled: false                   # 开启 residual 修正
@@ -55,7 +55,7 @@ embedding:
   mode: sum
   sparse_grad: true
 model:
-  name: gateall_dypos_hetero_ple
+  name: gateall_dypos_homo_ple
   mtl: ple
   enabled_heads:
   - ctr
@@ -137,6 +137,7 @@ model:
           type: mlp
           dims:
           - 128
+          - 64
           activation: relu
           dropout: 0.05
           use_bn: false
@@ -231,7 +232,7 @@ loss:
   w_ctr: 1.0
   w_cvr: 1.0
   eps: 1.0e-06
-  pos_weight_dynamic: true
+  pos_weight_dynamic: false
   static_pos_weight:
     ctr: 1
     ctcvr: 1

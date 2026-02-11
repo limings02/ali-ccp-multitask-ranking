@@ -27,8 +27,29 @@ esmm:
   version: "v2"
   eps: 1.0e-8
   lambda_ctr: 1.0
-  lambda_ctcvr: 1.0
-  lambda_cvr_aux: 0.1
+  lambda_ctcvr: 5
+  lambda_cvr_aux: 0.3
+
+  residual:
+    enabled: false                   # 开启 residual 修正
+    input: "mmoe_cvr"               # 输入来源: CVR 分支的 MMoE/PLE 输出
+    stop_grad_input: true          # false: 允许 ctcvr loss 更新 shared/moe 表征
+                                    # true: 阻断梯度，仅更新 residual head
+    mlp_dims: [64]                  # MLP 隐藏层维度, 可用 [128, 64] 加深
+    dropout: 0.1                    # MLP dropout
+    use_layernorm: true             # 输入侧 LayerNorm（推荐 true）
+    alpha: 1.0                      # tanh 限幅系数, r_logit ∈ [-alpha, +alpha]
+
+    # 显式 L2 正则: L_res_reg = mean(r_logit^2) * res_reg_weight
+    # 鼓励残差保持小幅修正，避免 residual 替代 ESMM 乘法
+    res_reg_weight: 5.0e-4
+
+    # Anchor loss（可选，默认关闭）
+    # 让 residual 修正后的 ctcvr_logit 不要偏离乘法版本太远
+    anchor:
+      enabled: false
+      weight: 0.02                  # MSE(ctcvr_logit, logit_mul) 的权重
+      eps: 1.0e-6
 
 # ============================================================================
 # Data Config（公共锁定）
@@ -88,7 +109,7 @@ model:
     num_experts: 4                    # 继承 E3：4 个共享专家
     expert_mlp_dims: [128]            # 继承 E3：每个专家是简单的 MLP
     gate_type: "linear"               # 继承 E3：线性 gate
-    gate_hidden_dims: [64]            # 测试，给gate一点非线性
+    gate_hidden_dims: [32]            # 测试，给gate一点非线性
     input: "deep_h"                   # 继承 E3：输入为 DeepFM 的 deep_h
 
     # add_fm_vec: false

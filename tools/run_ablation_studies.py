@@ -31,24 +31,19 @@ PROJECT_ROOT = Path(__file__).parent.parent
 # 实验配置列表
 EXPERIMENTS = [
     {
-        "name": "mmoe_optim/base_mmoe",
-        "config": "configs/experiments/mmoe_optim/base_mmoe.yaml",
-        "description": "MMoE + Gate Stabilize (低正则权重: 1.0e-4)"
-    },
-    {
-        "name": "mmoe_optim/midgate_mmoe",
-        "config": "configs/experiments/mmoe_optim/midgate_mmoe.yaml",
-        "description": "MMoE + Gate Stabilize (高正则权重: 3.0e-4)"
+    "name": "mmoe",
+    "config": "configs\\experiments\\mmoe_optim\\midgate_mmoe.yaml",
+    "description": "mmoe)"
     },
     {
         "name": "ple_optim/hetero_ple",
-        "config": "configs/experiments/ple_optim/hetero_ple.yaml",
-        "description": "PLE Hetero (gate_reg_scope: shared_only)"
+        "config": "configs/experiments/ple_optim/gateall_dypos_hetero_ple.yaml",
+        "description": "PLE homo)"
     },
     {
         "name": "ple_optim/gateall_hetero_ple",
-        "config": "configs/experiments/ple_optim/gateall_hetero_ple.yaml",
-        "description": "PLE Hetero (gate_reg_scope: all)"
+        "config": "configs/experiments/ple_optim/gateall_dypos_homo_ple.yaml",
+        "description": "PLE hetero"
     },
 ]
 

@@ -268,25 +268,45 @@ class Trainer:
             )
             
             # ====================================================================
-            # 打印 pos_weight 配置: raw (原始配置) / clip (裁剪上限) / effective (实际使用)
-            # 此日志用于验证 pos_weight_clip 是否真正生效
+            # 打印 pos_weight 配置（区分动态/静态模式）
             # ====================================================================
-            from src.loss.bce import _effective_pos_weight
-            ctr_raw = float(static_pos_weight_cfg.get("ctr", 1.0))
-            ctcvr_raw = float(static_pos_weight_cfg.get("ctcvr", 1.0))
+            pos_weight_dynamic = bool(loss_cfg.get("pos_weight_dynamic", True))
             ctr_clip = float(pos_weight_clip_cfg.get("ctr")) if "ctr" in pos_weight_clip_cfg else None
             ctcvr_clip = float(pos_weight_clip_cfg.get("ctcvr")) if "ctcvr" in pos_weight_clip_cfg else None
-            ctr_effective, ctr_clipped = _effective_pos_weight(ctr_raw, ctr_clip)
-            ctcvr_effective, ctcvr_clipped = _effective_pos_weight(ctcvr_raw, ctcvr_clip)
             
-            self.logger.info(
-                "[pos_weight] CTR: raw=%.2f clip=%s effective=%.2f clipped=%s",
-                ctr_raw, ctr_clip, ctr_effective, ctr_clipped
-            )
-            self.logger.info(
-                "[pos_weight] CTCVR: raw=%.2f clip=%s effective=%.2f clipped=%s",
-                ctcvr_raw, ctcvr_clip, ctcvr_effective, ctcvr_clipped
-            )
+            if pos_weight_dynamic:
+                # 动态模式：训练时按 batch 实时计算 neg/pos，这里只显示 clip 配置
+                self.logger.info(
+                    "[pos_weight] Mode: DYNAMIC (computed per-batch from neg/pos ratio)"
+                )
+                self.logger.info(
+                    "[pos_weight] Clip limits - CTR: %s | CTCVR: %s",
+                    f"{ctr_clip:.1f}" if ctr_clip is not None else "None (no limit)",
+                    f"{ctcvr_clip:.1f}" if ctcvr_clip is not None else "None (no limit)"
+                )
+                self.logger.info(
+                    "[pos_weight] 💡 Actual dynamic values are logged in training metrics: "
+                    "pos_weight_ctr_raw, pos_weight_ctr_effective, pos_weight_ctcvr_raw, pos_weight_ctcvr_effective"
+                )
+            else:
+                # 静态模式：使用配置的固定值
+                from src.loss.bce import _effective_pos_weight
+                ctr_raw = float(static_pos_weight_cfg.get("ctr", 1.0))
+                ctcvr_raw = float(static_pos_weight_cfg.get("ctcvr", 1.0))
+                ctr_effective, ctr_clipped = _effective_pos_weight(ctr_raw, ctr_clip)
+                ctcvr_effective, ctcvr_clipped = _effective_pos_weight(ctcvr_raw, ctcvr_clip)
+                
+                self.logger.info(
+                    "[pos_weight] Mode: STATIC (fixed values from config)"
+                )
+                self.logger.info(
+                    "[pos_weight] CTR: raw=%.2f clip=%s effective=%.2f clipped=%s",
+                    ctr_raw, ctr_clip, ctr_effective, ctr_clipped
+                )
+                self.logger.info(
+                    "[pos_weight] CTCVR: raw=%.2f clip=%s effective=%.2f clipped=%s",
+                    ctcvr_raw, ctcvr_clip, ctcvr_effective, ctcvr_clipped
+                )
             
             # Log Aux Focal configuration if enabled
             if aux_focal_cfg.get("enabled", False):

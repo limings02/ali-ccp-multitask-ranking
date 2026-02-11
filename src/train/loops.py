@@ -668,6 +668,18 @@ def train_one_epoch(
                 ctr_pw = loss_dict.get("pos_weight_ctr")
                 if ctr_pw is not None:
                     log_parts.append(f"ctr_pos_w={ctr_pw:.3f}")
+                ctr_pw_raw = loss_dict.get("pos_weight_ctr_raw")
+                if ctr_pw_raw is not None:
+                    log_parts.append(f"ctr_pos_w_raw={ctr_pw_raw:.3f}")
+                ctr_pw_eff = loss_dict.get("pos_weight_ctr_effective")
+                if ctr_pw_eff is not None:
+                    log_parts.append(f"ctr_pos_w_eff={ctr_pw_eff:.3f}")
+                ctcvr_pw_raw = loss_dict.get("pos_weight_ctcvr_raw")
+                if ctcvr_pw_raw is not None:
+                    log_parts.append(f"ctcvr_pos_w_raw={ctcvr_pw_raw:.3f}")
+                ctcvr_pw_eff = loss_dict.get("pos_weight_ctcvr_effective")
+                if ctcvr_pw_eff is not None:
+                    log_parts.append(f"ctcvr_pos_w_eff={ctcvr_pw_eff:.3f}")
             
             # ============================================================
             # 改动 A: Log current learning rate
@@ -1079,6 +1091,18 @@ def validate(
                     ctr_pw = loss_dict.get("pos_weight_ctr")
                     if ctr_pw is not None:
                         log_parts.append(f"ctr_pos_w={ctr_pw:.3f}")
+                    ctr_pw_raw = loss_dict.get("pos_weight_ctr_raw")
+                    if ctr_pw_raw is not None:
+                        log_parts.append(f"ctr_pos_w_raw={ctr_pw_raw:.3f}")
+                    ctr_pw_eff = loss_dict.get("pos_weight_ctr_effective")
+                    if ctr_pw_eff is not None:
+                        log_parts.append(f"ctr_pos_w_eff={ctr_pw_eff:.3f}")
+                    ctcvr_pw_raw = loss_dict.get("pos_weight_ctcvr_raw")
+                    if ctcvr_pw_raw is not None:
+                        log_parts.append(f"ctcvr_pos_w_raw={ctcvr_pw_raw:.3f}")
+                    ctcvr_pw_eff = loss_dict.get("pos_weight_ctcvr_effective")
+                    if ctcvr_pw_eff is not None:
+                        log_parts.append(f"ctcvr_pos_w_eff={ctcvr_pw_eff:.3f}")
                 log_parts.append(f"time={elapsed:.2f}s")
                 logger.info(" ".join(log_parts))
 

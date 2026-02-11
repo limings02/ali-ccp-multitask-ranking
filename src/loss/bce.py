@@ -35,6 +35,41 @@ def _effective_pos_weight(raw: float, clip: float | None) -> tuple[float, bool]:
     return raw, False
 
 
+def _compute_dynamic_pos_weight(
+    y: torch.Tensor,
+    clip: float | None,
+    eps: float = 1e-6,
+    device: torch.device | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> tuple[torch.Tensor, float, float]:
+    """
+    动态计算 pos_weight = neg_count / pos_count，并应用 clip。
+    
+    Args:
+        y: 标签 tensor {0, 1}
+        clip: 裁剪上限，如果为 None 或 <= 0 则不裁剪
+        eps: 防除零的最小值
+        device: 输出 tensor 的设备（默认使用 y.device）
+        dtype: 输出 tensor 的数据类型
+    
+    Returns:
+        (pos_weight_tensor, pos_weight_raw, pos_weight_effective)
+        - pos_weight_tensor: 用于传入 BCE loss 的 tensor
+        - pos_weight_raw: 裁剪前的原始值（float）
+        - pos_weight_effective: 裁剪后的有效值（float）
+    """
+    pos_count = torch.clamp(y.sum(), min=eps)
+    neg_count = torch.clamp((1.0 - y).sum(), min=eps)
+    pw_raw = float((neg_count / pos_count).item())
+    
+    # 应用 clip
+    pw_effective, _ = _effective_pos_weight(pw_raw, clip)
+    
+    # 返回 tensor 和 float
+    pw_tensor = torch.tensor(pw_effective, device=device or y.device, dtype=dtype)
+    return pw_tensor, pw_raw, pw_effective
+
+
 # ============================================================================
 # Auxiliary Focal Loss (Logits Version)
 # ============================================================================
@@ -325,16 +360,16 @@ class MultiTaskBCELoss:
             assert ctr_logit.shape == y_ctr.shape, "ctr logit/label shape mismatch"
             if self.pos_weight_dynamic:
                 # 动态计算 CTR 正例权重：neg/pos
-                pos_count = torch.clamp(y_ctr.sum(), min=self.eps)
-                neg_count = torch.clamp((1.0 - y_ctr).sum(), min=self.eps)
-                pos_weight_ctr = neg_count / pos_count
+                pos_weight_ctr, _, _ = _compute_dynamic_pos_weight(
+                    y_ctr, self.pos_weight_clip_ctr, eps=self.eps,
+                    device=ctr_logit.device, dtype=ctr_logit.dtype
+                )
             else:
                 # Static mode falls back to 1.0 if not provided to avoid crashing old checkpoints.
                 static_val = self.static_pos_weight_ctr if self.static_pos_weight_ctr is not None else 1.0
                 pos_weight_ctr = torch.tensor(static_val, device=ctr_logit.device, dtype=ctr_logit.dtype)
-
-            if self.pos_weight_clip_ctr is not None:
-                pos_weight_ctr = torch.clamp(pos_weight_ctr, max=self.pos_weight_clip_ctr)
+                if self.pos_weight_clip_ctr is not None:
+                    pos_weight_ctr = torch.clamp(pos_weight_ctr, max=self.pos_weight_clip_ctr)
 
             pos_weight_ctr_val = float(pos_weight_ctr.item())
             loss_ctr = F.binary_cross_entropy_with_logits(
@@ -475,14 +510,22 @@ class MultiTaskBCELoss:
         y_ctcvr_f32 = y_ctcvr.float()
 
         # ====================================================================
-        # CTR pos_weight: 使用 _effective_pos_weight 统一计算逻辑
+        # CTR pos_weight: 动态或静态计算
         # ====================================================================
-        ctr_pw_raw = self.static_pos_weight_ctr if self.static_pos_weight_ctr is not None else 1.0
-        ctr_pw_effective, ctr_clipped = _effective_pos_weight(ctr_pw_raw, self.pos_weight_clip_ctr)
-        pos_weight_ctr = torch.tensor(ctr_pw_effective, device=ctr_logit.device, dtype=torch.float32)
+        if self.pos_weight_dynamic:
+            pos_weight_ctr, ctr_pw_raw, ctr_pw_effective = _compute_dynamic_pos_weight(
+                y_ctr_f32, self.pos_weight_clip_ctr, eps=self.eps,
+                device=ctr_logit.device, dtype=torch.float32
+            )
+        else:
+            ctr_pw_raw = self.static_pos_weight_ctr if self.static_pos_weight_ctr is not None else 1.0
+            ctr_pw_effective, _ = _effective_pos_weight(ctr_pw_raw, self.pos_weight_clip_ctr)
+            pos_weight_ctr = torch.tensor(ctr_pw_effective, device=ctr_logit.device, dtype=torch.float32)
+        
         # 记录 raw 和 effective 值，用于日志和 metrics
         pos_weight_ctr_raw_val = float(ctr_pw_raw)
         pos_weight_ctr_effective_val = float(ctr_pw_effective)
+        ctr_clipped = (ctr_pw_raw != ctr_pw_effective)
 
         # CTR loss (standard BCE with logits)
         loss_ctr_bce = F.binary_cross_entropy_with_logits(
@@ -522,13 +565,22 @@ class MultiTaskBCELoss:
             log_p_ctcvr = log_p_ctr + log_p_cvr
             
             # ====================================================================
-            # CTCVR pos_weight: 使用 _effective_pos_weight 统一计算逻辑
+            # CTCVR pos_weight: 动态或静态计算
             # ====================================================================
-            ctcvr_pw_raw = self.static_pos_weight_ctcvr if self.static_pos_weight_ctcvr is not None else 1.0
-            ctcvr_pw_effective, ctcvr_clipped = _effective_pos_weight(ctcvr_pw_raw, self.pos_weight_clip_ctcvr)
+            if self.pos_weight_dynamic:
+                # 动态计算 CTCVR 正例权重
+                _, ctcvr_pw_raw, ctcvr_pw_effective = _compute_dynamic_pos_weight(
+                    y_ctcvr_f32, self.pos_weight_clip_ctcvr, eps=self.eps,
+                    device=ctr_logit.device, dtype=torch.float32
+                )
+            else:
+                ctcvr_pw_raw = self.static_pos_weight_ctcvr if self.static_pos_weight_ctcvr is not None else 1.0
+                ctcvr_pw_effective, _ = _effective_pos_weight(ctcvr_pw_raw, self.pos_weight_clip_ctcvr)
+            
             # 记录 raw 和 effective 值，用于日志和 metrics
             pos_weight_ctcvr_raw_val = float(ctcvr_pw_raw)
             pos_weight_ctcvr_effective_val = float(ctcvr_pw_effective)
+            ctcvr_clipped = (ctcvr_pw_raw != ctcvr_pw_effective)
             
             # Weighted BCE from log-probability
             # BCE = -y * log(p) - (1-y) * log(1-p)
@@ -701,14 +753,22 @@ class MultiTaskBCELoss:
             # ============================================================
             # Legacy ESMM: treat CVR logit as CTCVR logit (DEPRECATED)
             # ====================================================================
-            # CTCVR pos_weight: 使用 _effective_pos_weight 统一计算逻辑
+            # CTCVR pos_weight: 动态或静态计算
             # ====================================================================
-            ctcvr_pw_raw = self.static_pos_weight_ctcvr if self.static_pos_weight_ctcvr is not None else 1.0
-            ctcvr_pw_effective, ctcvr_clipped = _effective_pos_weight(ctcvr_pw_raw, self.pos_weight_clip_ctcvr)
-            pos_weight_ctcvr = torch.tensor(ctcvr_pw_effective, device=cvr_logit.device, dtype=torch.float32)
+            if self.pos_weight_dynamic:
+                pos_weight_ctcvr, ctcvr_pw_raw, ctcvr_pw_effective = _compute_dynamic_pos_weight(
+                    y_ctcvr_f32, self.pos_weight_clip_ctcvr, eps=self.eps,
+                    device=cvr_logit.device, dtype=torch.float32
+                )
+            else:
+                ctcvr_pw_raw = self.static_pos_weight_ctcvr if self.static_pos_weight_ctcvr is not None else 1.0
+                ctcvr_pw_effective, _ = _effective_pos_weight(ctcvr_pw_raw, self.pos_weight_clip_ctcvr)
+                pos_weight_ctcvr = torch.tensor(ctcvr_pw_effective, device=cvr_logit.device, dtype=torch.float32)
+            
             # 记录 raw 和 effective 值
             pos_weight_ctcvr_raw_val = float(ctcvr_pw_raw)
             pos_weight_ctcvr_effective_val = float(ctcvr_pw_effective)
+            ctcvr_clipped = (ctcvr_pw_raw != ctcvr_pw_effective)
             
             loss_ctcvr = F.binary_cross_entropy_with_logits(
                 cvr_logit_f32, y_ctcvr_f32, reduction="mean", pos_weight=pos_weight_ctcvr
@@ -796,7 +856,7 @@ class MultiTaskBCELoss:
             "pos_weight_ctcvr_raw": pos_weight_ctcvr_raw_val,
             "pos_weight_ctcvr_effective": pos_weight_ctcvr_effective_val,
             "pos_weight_ctcvr_clipped": ctcvr_clipped,
-            "pos_weight_mode": f"static_esmm_{self.esmm_version}",
+            "pos_weight_mode": f"{'dynamic' if self.pos_weight_dynamic else 'static'}_esmm_{self.esmm_version}",
             "p_ctr_mean": p_ctr_mean,
             "p_cvr_mean": p_cvr_mean,
             "p_ctcvr_mean": p_ctcvr_mean,
@@ -839,4 +899,4 @@ class MultiTaskBCELoss:
         return loss_total, loss_dict
 
 
-__all__ = ["MultiTaskBCELoss", "log1mexp", "bce_from_logp", "focal_on_logits_aux", "_effective_pos_weight"]
+__all__ = ["MultiTaskBCELoss", "log1mexp", "bce_from_logp", "focal_on_logits_aux", "_effective_pos_weight", "_compute_dynamic_pos_weight"]
