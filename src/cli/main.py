@@ -263,6 +263,9 @@ def main():
         print(json.dumps(result, indent=2))
     elif args.command == "train":
         cfg = load_yaml(args.config)
+        # ===== Support --resume-path command line argument =====
+        if args.resume_path:
+            cfg.setdefault("runtime", {})["resume_path"] = args.resume_path
         trainer = Trainer(cfg, config_path=args.config)
         trainer.run()
     elif args.command == "eval":

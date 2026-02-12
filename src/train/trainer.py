@@ -172,6 +172,9 @@ class Trainer:
             neg_keep_prob_train=self.neg_keep_prob_train,
             prefetch_factor=train_prefetch,
             worker_cpu_threads=worker_cpu_threads,
+            # ===== Resume state for strict checkpoint recovery =====
+            resume_state=getattr(self, "data_resume_state", None),
+            enable_data_cursor=True,
         )
         # Use separate num_workers for validation to avoid memory issues
         # Default to half of train workers or max 2 to prevent OOM with persistent_workers
@@ -421,7 +424,15 @@ class Trainer:
             if "best_selector" in extra:
                 self.best_selector.load_state(extra["best_selector"])
                 self.logger.info("Restored best_selector state from checkpoint")
+            
+            # ===== Restore dataset resume state for strict checkpoint recovery =====
+            self.data_resume_state = extra.get("data_state")
+            if self.data_resume_state:
+                self.logger.info(f"Restored data_state for {len(self.data_resume_state)} workers")
+            
             self.logger.info(f"Resumed from {resume_path}, step={self.global_step}, best_metric={self.best_metric}")
+        else:
+            self.data_resume_state = None
 
     def _write_metrics(self, metrics: Dict[str, Any]) -> None:
         payload = {
@@ -511,6 +522,10 @@ class Trainer:
                     # Save best_selector state for resume support
                     eval_extra["best_selector"] = self.best_selector.get_state()
                     
+                    # ===== Include data_state for strict resume =====
+                    if hasattr(self, "last_data_state") and self.last_data_state:
+                        eval_extra["data_state"] = self.last_data_state
+                    
                     save_checkpoint(
                         self.run_dir / "ckpt_best.pt",
                         self.model,
@@ -561,6 +576,12 @@ class Trainer:
             self.global_step += train_metrics.get("steps", 0)
             train_record = {"epoch": epoch_num, "split": "train", **train_metrics}
             self._write_metrics(train_record)
+            
+            # ===== Collect data state from train metrics for resume support =====
+            if "data_state" in train_metrics:
+                self.last_data_state = train_metrics["data_state"]
+            else:
+                self.last_data_state = None
 
             valid_metrics = validate(
                 self.model,
@@ -585,6 +606,10 @@ class Trainer:
             ckpt_extra = {"epoch": epoch_num}
             if self.lr_scheduler_bundle.enabled:
                 ckpt_extra["lr_scheduler"] = self.lr_scheduler_bundle.state_dict()
+            
+            # ===== Include data_state for strict resume =====
+            if hasattr(self, "last_data_state") and self.last_data_state:
+                ckpt_extra["data_state"] = self.last_data_state
             
             if save_last:
                 save_checkpoint(

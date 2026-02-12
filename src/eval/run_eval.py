@@ -129,6 +129,9 @@ def run_eval(
     feature_meta = build_model_feature_meta(Path(cfg["data"]["metadata_path"]), cfg.get("embedding", {}))
     loader = _build_dataloader(cfg, split=split, feature_meta=feature_meta)
     model = build_model(cfg).to(device)
+    
+    # Get use_wide flag from config
+    use_wide = bool(cfg.get("model", {}).get("use_wide", False))
 
     if ckpt_path:
         load_checkpoint(ckpt_path, model, optimizer=None, map_location=device, strict=False)
@@ -164,8 +167,8 @@ def run_eval(
     cvr_logit_list = [] if use_cvr else None
     ctcvr_logit_list = [] if use_cvr and use_esmm else None
     ctcvr_logit_res_list = [] if use_cvr and use_esmm else None
-    ctr_wide_logit_list = [] if use_ctr else None
-    ctr_parts_list = [] if use_ctr else None
+    ctr_wide_logit_list = [] if (use_ctr and use_wide) else None
+    ctr_parts_list = [] if (use_ctr and use_wide) else None
     logit_parts_decomposable = None
 
     with torch.no_grad():
@@ -183,7 +186,7 @@ def run_eval(
                     ctr_logit = ctr_logit.view(-1)
                 y_ctr_list.append(labels_dev["y_ctr"].cpu().numpy())
                 ctr_logit_list.append(ctr_logit.cpu().numpy())
-                if "ctr_logit_parts" in outputs:
+                if ctr_parts_list is not None and "ctr_logit_parts" in outputs:
                     parts = outputs["ctr_logit_parts"]
                     ctr_parts_list.append(
                         {

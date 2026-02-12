@@ -1,5 +1,6 @@
 experiment:
-  name: base_homo_ple
+  name: two_layer_homo_ple
+
 use_esmm: true
 esmm:
   version: v2
@@ -9,24 +10,17 @@ esmm:
   lambda_cvr_aux: 0.3
 
   residual:
-    enabled: false                   # 开启 residual 修正
-    input: "mmoe_cvr"               # 输入来源: CVR 分支的 MMoE/PLE 输出
-    stop_grad_input: true          # false: 允许 ctcvr loss 更新 shared/moe 表征
-                                    # true: 阻断梯度，仅更新 residual head
-    mlp_dims: [64]                  # MLP 隐藏层维度, 可用 [128, 64] 加深
-    dropout: 0.1                    # MLP dropout
-    use_layernorm: true             # 输入侧 LayerNorm（推荐 true）
-    alpha: 1.0                      # tanh 限幅系数, r_logit ∈ [-alpha, +alpha]
-
-    # 显式 L2 正则: L_res_reg = mean(r_logit^2) * res_reg_weight
-    # 鼓励残差保持小幅修正，避免 residual 替代 ESMM 乘法
+    enabled: false
+    input: "mmoe_cvr"
+    stop_grad_input: true
+    mlp_dims: [64]
+    dropout: 0.1
+    use_layernorm: true
+    alpha: 1.0
     res_reg_weight: 5.0e-4
-
-    # Anchor loss（可选，默认关闭）
-    # 让 residual 修正后的 ctcvr_logit 不要偏离乘法版本太远
     anchor:
       enabled: false
-      weight: 0.02                  # MSE(ctcvr_logit, logit_mul) 的权重
+      weight: 0.02
       eps: 1.0e-6
 
 data:
@@ -41,28 +35,26 @@ data:
   debug: false
   seed: 20260127
   neg_keep_prob_train: 1.0
+
 sampling:
   negative_sampling: none
+
 embedding:
   default_embedding_dim: 8
   embedding_dim_overrides: {}
-embedding:
-  default_embedding_dim: 8
-  # embedding_dim_overrides:
-  #   user_id: 16      # user_id 特征用 16 维
-  #   item_id: 32      # item_id 特征用 32 维
-  #   category: 8      # 其他特征仍用默认的 8 维
   mode: sum
   sparse_grad: true
+
 model:
-  name: base_ple
+  name: two_layer_ple
   mtl: ple
   enabled_heads:
-  - ctr
-  - cvr
+    - ctr
+    - cvr
   tasks:
-  - ctr
-  - cvr
+    - ctr
+    - cvr
+  
   backbone:
     use_legacy_pseudo_deepfm: false
     return_logit_parts: true
@@ -73,74 +65,15 @@ model:
       cvr:
         use_wide: false
         use_fm: false
-    deep_hidden_dims:
-    - 128
-    - 64
+    deep_hidden_dims: [128, 64]
     deep_dropout: 0.2
     deep_activation: relu
     deep_use_bn: false
-    fm_enabled: false
+    fm_enabled: true
     fm_projection_dim: 16
     out_dim: 64
+
   ple:
-    # hetero_enabled: false
-    # expert_out_dim: 128
-    # expert_output_align:
-    #   layernorm: true
-    #   learnable_scale: true
-    #   dropout: 0.1
-    # experts:
-    #   shared:
-    #   - name: mlp_deep
-    #     type: mlp
-    #     dims:
-    #     - 256
-    #     - 128
-    #     activation: relu
-    #     dropout: 0.1
-    #     use_bn: false
-    #   - name: mlp_shallow
-    #     type: mlp
-    #     dims:
-    #     - 128
-    #     activation: relu
-    #     dropout: 0.05
-    #     use_bn: false
-    #   - name: cross_v2
-    #     type: crossnet_v2
-    #     num_layers: 3
-    #     low_rank: 64
-    #     use_bias: true
-    #     proj:
-    #       enabled: true
-    #       out_dim: 128
-    #   - name: cross_v2_small
-    #     type: crossnet_v2
-    #     num_layers: 2
-    #     low_rank: 32
-    #     use_bias: true
-    #     proj:
-    #       enabled: true
-    #       out_dim: 128
-    #   private:
-    #     ctr:
-    #     - name: ctr_cross
-    #       type: crossnet_v2
-    #       num_layers: 3
-    #       low_rank: 64
-    #       use_bias: true
-    #       proj:
-    #         enabled: true
-    #         out_dim: 128
-    #     cvr:
-    #     - name: cvr_mlp
-    #       type: mlp
-    #       dims:
-    #       - 128
-    #       - 64
-    #       activation: relu
-    #       dropout: 0.05
-    #       use_bn: false
     # ========== 新增：两层PLE配置 ==========
     num_ple_layers: 2        # 1 = 单层, 2 = 两层（可扩展到N层）
     
@@ -165,11 +98,13 @@ model:
       dropout: 0.2
       activation: relu
       use_bn: false
-
+    
+    # Gate配置对两层共享
     gate_type: linear
-    gate_hidden_dims:
-    - 32
+    gate_hidden_dims: [32]
     log_gates: true
+    
+    # Gate稳定化（应用于两层）
     gate_stabilize:
       enabled: true
       eps: 1.0e-08
@@ -183,7 +118,9 @@ model:
         temperature_end: 1.0
         noise_std_start: 0.05
         noise_std_end: 0.01
-    gate_reg_scope: all
+    
+    gate_reg_scope: all      # 两层都应用正则化
+    
     gate_shared_mass_floor:
       enabled: false
       per_task:
@@ -193,14 +130,9 @@ model:
         cvr:
           min_mass: 0.2
           weight: 0.0005
-    input: deep_h
-    # add_fm_vec: true
-    # add_emb: mean  # mean/sum/concat
-    # part_proj_dim: 128 #要不要让各部分投影到统一的维度
-    # fusion: concat #concat/sum
-    # adapter_mlp_dims:
-    # - 128
-    # norm: layernorm
+    
+    input: deep_h            # 第一层输入来源
+
   log_gates: true
   heads:
     default:
@@ -208,36 +140,30 @@ model:
       dropout: 0.1
       use_bn: false
       activation: relu
-    ctr: {}  # 使用 default 配置
-    cvr: {}    # CVR 任务特定配置
-      # mlp_dims: [256, 128]  # 更深的网络
-      # dropout: 0.15         # 更高的 dropout
-      # activation: relu
+    ctr: {}
+    cvr: {}
 
 optim:
   type: dual_sparse_dense
   dense:
     lr: 0.0006
     weight_decay: 1e-5
-    betas:
-    - 0.9
-    - 0.999
+    betas: [0.9, 0.999]
     eps: 1.0e-08
   sparse:
     enabled: true
     lr: 0.001
-    betas:
-    - 0.9
-    - 0.999
+    betas: [0.9, 0.999]
     eps: 1.0e-08
     allow_fallback_if_empty: false
   lr_scheduler:
     enabled: true
     target: both
     type: cosine
-    warmup_steps: 4000
-    total_steps: 40000
+    warmup_steps: 5000
+    total_steps: 80000
     min_lr_ratio: 0.1
+
 loss:
   w_ctr: 1.0
   w_cvr: 1.0
@@ -253,12 +179,8 @@ loss:
     enabled: false
     target: ctcvr
     type: piecewise
-    milestones:
-    - 0
-    - 8000
-    values:
-    - 300
-    - 30
+    milestones: [0, 8000]
+    values: [300, 30]
   aux_focal:
     enabled: false
     warmup_steps: 8000
@@ -270,6 +192,7 @@ loss:
     detach_p_for_weight: true
     compute_fp32: true
     log_components: true
+
 runtime:
   device: cuda
   epochs: 2
@@ -279,7 +202,7 @@ runtime:
   grad_diag_every: 1000
   grad_diag_min_tasks: 2
   log_health_metrics: true
-  max_train_steps: 40000
+  max_train_steps: 80000
   max_valid_steps: null
   grad_clip_norm: 2.0
   seed: 20260127
@@ -292,9 +215,7 @@ runtime:
   best_selection:
     strategy: gate
     primary_key: auc_ctcvr
-    aux_keys:
-    - auc_ctr
-    - auc_cvr
+    aux_keys: [auc_ctr, auc_cvr]
     use_primary_ma: false
     ma_window: 5
     tol_primary: 0.0001
@@ -310,14 +231,8 @@ runtime:
     log_on_valid: true
     utilization:
       enabled: true
-      dead_mean_threshold: 0.01
-      dead_p95_threshold: 0.01
-      dead_require_p95: false
-      rank_dom_top1_threshold: 0.95
-      rank_dom_uniform_eps: 0.03
-      rank_dom_std_eps: 0.02
-      monopoly_top1_threshold: 0.95
-      monopoly_mean_threshold: null
+      dead_threshold: 0.01
+      monopoly_threshold: 0.8
       compute_gini: true
     output_stats:
       enabled: true

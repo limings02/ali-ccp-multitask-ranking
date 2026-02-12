@@ -11,12 +11,54 @@ from __future__ import annotations
 import json
 import random
 from pathlib import Path
-from typing import Dict, Iterator, List, Tuple
+from typing import Dict, Iterator, List, Tuple, Optional
+from dataclasses import dataclass, asdict, field
 
 import logging
 import pyarrow.dataset as ds
 import torch
 from torch.utils.data import IterableDataset, DataLoader, get_worker_info
+
+
+# ============================================================
+# Resume State Management for Checkpoint Recovery
+# ============================================================
+@dataclass
+class DatasetWorkerState:
+    """
+    Per-worker iteration state for resume support.
+    - frag_idx: current fragment index (within worker's assigned fragments)
+    - batch_idx: current batch index within the fragment
+    - row_idx: current row index within the batch (for partial batch resume)
+    - rng_state: pickled state of random.Random for deterministic neg sampling
+    """
+    frag_idx: int = 0
+    batch_idx: int = 0
+    row_idx: int = 0
+    rng_state: Optional[Tuple] = None
+
+    def to_dict(self) -> Dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict) -> "DatasetWorkerState":
+        return cls(**d)
+
+
+@dataclass
+class DatasetResumeState:
+    """
+    Global state tracking for all workers. Used by Trainer to save/restore.
+    Maps worker_id -> DatasetWorkerState dict
+    """
+    data_state: Dict[int, Dict] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict:
+        return {"data_state": self.data_state}
+
+    @classmethod
+    def from_dict(cls, d: Dict) -> "DatasetResumeState":
+        return cls(data_state=d.get("data_state", {}))
 
 
 def _load_feature_meta(meta_path: Path) -> Tuple[Dict[str, Dict[str, bool]], Dict[str, int]]:
@@ -38,6 +80,8 @@ class ProcessedIterDataset(IterableDataset):
     Stream rows from processed parquet using pyarrow.dataset.
     Worker sharding is done by slicing the fragment list so each worker reads
     disjoint files and no examples are duplicated.
+    
+    Support resume from checkpoint: restore fragment/batch/row positions per worker.
     """
 
     def __init__(
@@ -45,10 +89,15 @@ class ProcessedIterDataset(IterableDataset):
         data_dir: str | Path,
         metadata_path: str | Path | None = None,
         neg_keep_prob: float = 1.0,
+        resume_state: Optional[DatasetResumeState] = None,
     ):
         self.data_dir = Path(data_dir)
         self.dataset = ds.dataset(self.data_dir, format="parquet")
-        self.fragments = list(self.dataset.get_fragments())
+        # Sort fragments for stable order across resume
+        self.fragments = sorted(
+            list(self.dataset.get_fragments()),
+            key=lambda f: str(f.path)
+        )
         meta_path = Path(metadata_path) if metadata_path else self.data_dir.parent / "metadata.json"
         self.feature_meta, rows_dict = _load_feature_meta(meta_path)
         # P1-6: prefer pre-computed row count from metadata to avoid expensive count_rows()
@@ -62,29 +111,65 @@ class ProcessedIterDataset(IterableDataset):
         self.neg_keep_prob = float(neg_keep_prob)
         if self.neg_keep_prob < 0.0 or self.neg_keep_prob > 1.0:
             raise ValueError("neg_keep_prob must be in [0,1]")
+        
+        # Resume state
+        self.resume_state = resume_state or DatasetResumeState()
 
     def __iter__(self) -> Iterator[Dict]:
         info = get_worker_info()
+        worker_id = info.id if info is not None else 0
+        num_workers = info.num_workers if info is not None else 1
+        
+        # Get fragments assigned to this worker
         fragments = self.fragments
         if info is not None and info.num_workers > 1:
             fragments = fragments[info.id :: info.num_workers]
+        
+        # Recover resume state for this worker
+        worker_state_dict = self.resume_state.data_state.get(worker_id)
+        if worker_state_dict:
+            worker_state = DatasetWorkerState.from_dict(worker_state_dict)
+        else:
+            worker_state = DatasetWorkerState()
+        
+        # Initialize RNG
         rng = random.Random()
-        # Derive a worker-specific seed to keep stochastic filtering stable per worker.
         if info is not None:
             rng.seed(info.seed ^ 0xABCDEF)
-        for frag in fragments:
-            for batch in frag.to_batches():
-                # Optimized: use columnar format to avoid per-row dict construction overhead
+        
+        # Restore RNG state if available (for deterministic neg sampling)
+        if worker_state.rng_state is not None:
+            try:
+                rng.setstate(worker_state.rng_state)
+            except Exception as e:
+                _logger = logging.getLogger(__name__)
+                _logger.warning(f"Failed to restore RNG state for worker {worker_id}: {e}")
+                worker_state.rng_state = None
+        
+        # Iterate from saved position
+        for frag_idx in range(worker_state.frag_idx, len(fragments)):
+            frag = fragments[frag_idx]
+            batches = list(frag.to_batches())
+            
+            # Start from saved batch index
+            batch_start_idx = worker_state.batch_idx if frag_idx == worker_state.frag_idx else 0
+            for batch_idx in range(batch_start_idx, len(batches)):
+                batch = batches[batch_idx]
+                
                 try:
                     cols = {name: batch.column(name).to_numpy(zero_copy_only=False) 
                             for name in batch.schema.names}
                 except Exception:
-                    # Fallback to original method if zero_copy fails
                     cols = batch.to_pydict()
                 
                 rows = batch.num_rows
-                for i in range(rows):
+                # Start from saved row index
+                row_start_idx = worker_state.row_idx if (frag_idx == worker_state.frag_idx 
+                                                          and batch_idx == worker_state.batch_idx) else 0
+                
+                for i in range(row_start_idx, rows):
                     row = {k: v[i] for k, v in cols.items()}
+                    
                     if self.split_name == "train" and self.neg_keep_prob < 1.0:
                         # Down-sample only when y_ctr is negative.
                         y_ctr = row.get("y_ctr", None)
@@ -94,7 +179,20 @@ class ProcessedIterDataset(IterableDataset):
                             is_negative = False
                         if is_negative and rng.random() > self.neg_keep_prob:
                             continue
+                    
+                    # Update position for next resume
+                    worker_state.frag_idx = frag_idx
+                    worker_state.batch_idx = batch_idx
+                    worker_state.row_idx = i + 1
+                    worker_state.rng_state = rng.getstate()
+                    
                     yield row
+                
+                # Reset row_idx after batch is done
+                worker_state.row_idx = 0
+            
+            # Reset batch_idx after fragment is done
+            worker_state.batch_idx = 0
 
     def __len__(self) -> int:
         return self._count
@@ -239,4 +337,4 @@ def build_dataloader(
 collate_fn = _collate_factory({})
 
 
-__all__ = ["ProcessedIterDataset", "build_dataloader", "collate_fn"]
+__all__ = ["ProcessedIterDataset", "build_dataloader", "collate_fn", "DatasetResumeState", "DatasetWorkerState"]

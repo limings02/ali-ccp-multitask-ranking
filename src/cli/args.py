@@ -198,6 +198,9 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument(
         "--config", type=str, default="configs/experiments/deepfm_sharedbottom_train.yaml", help="Experiment config."
     )
+    train_parser.add_argument(
+        "--resume-path", type=str, default=None, help="Path to checkpoint for resume training."
+    )
 
     eval_parser = subparsers.add_parser("eval", help="Evaluate a trained checkpoint.")
     eval_parser.add_argument(

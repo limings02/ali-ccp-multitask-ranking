@@ -238,6 +238,9 @@ class PLE(nn.Module):
         self.tasks: List[str] = tasks
         self.enabled_heads: Set[str] = {h.lower() for h in enabled}
 
+        # ========== 保存 ple_cfg 供后续使用（多层构建需要）==========
+        self.ple_cfg = ple_cfg
+
         # ========== 构建可选的 input composer（与 mmoe.py 对齐）==========
         self.composer: Optional[MMoEInputComposer] = build_composer_from_config(backbone, ple_cfg)
 
@@ -430,14 +433,59 @@ class PLE(nn.Module):
         in_dim: int,
     ) -> None:
         """
-        构建同构专家（旧逻辑，保持完全向后兼容）。
+        构建同构专家（支持单层/多层PLE）。
         
-        同构专家使用统一的 MLP 配置：
-          - shared_num_experts: 共享专家数量
-          - specific_num_experts: 每个任务的专属专家数量
-          - expert_mlp_dims: MLP 隐藏层维度
-          - dropout/activation/use_bn: MLP 配置
+        配置方式：
+          Option A (单层，传统)：
+            ple:
+              shared_num_experts: 4
+              specific_num_experts: {ctr: 1, cvr: 1}
+              expert_mlp_dims: [128]
+          
+          Option B (多层，新增)：
+            ple:
+              num_ple_layers: 2          # 启用多层模式
+              layer1:
+                shared_num_experts: 4
+                specific_num_experts: {ctr: 1, cvr: 1}
+                expert_mlp_dims: [128]
+              layer2:
+                shared_num_experts: 4
+                specific_num_experts: {ctr: 1, cvr: 1}
+                expert_mlp_dims: [128]
         """
+        # ========== 检测单层还是多层模式 ==========
+        num_ple_layers = int(ple_cfg.get("num_ple_layers", 1))
+        
+        if num_ple_layers == 1:
+            # 单层模式（现有逻辑）
+            self._build_single_layer_ple(ple_cfg, tasks, in_dim)
+        elif num_ple_layers >= 2:
+            # 多层模式（新增）
+            self._build_multi_layer_ple(ple_cfg, tasks, in_dim, num_ple_layers)
+        else:
+            raise ValueError(f"num_ple_layers must be >= 1, got {num_ple_layers}")
+
+        logger.info(f"[PLE] Built {num_ple_layers}-layer(s) homogeneous PLE structure")
+
+    def _build_single_layer_ple(
+        self,
+        ple_cfg: Dict[str, Any],
+        tasks: List[str],
+        in_dim: int,
+    ) -> None:
+        """
+        单层PLE（现有逻辑完全不变）。
+        
+        设置以下属性：
+          - self.num_ple_layers = 1
+          - self.num_shared_experts
+          - self.num_specific_experts (Dict[task, int])
+          - self.shared_experts
+          - self.specific_experts
+        """
+        self.num_ple_layers = 1
+        
         # ========== PLE 专属配置：shared + specific experts 数量 ==========
         # shared experts 数量（所有任务共享）
         self.num_shared_experts = int(ple_cfg.get("shared_num_experts", 4))
@@ -512,6 +560,192 @@ class PLE(nn.Module):
             shared_names = [f"[SHARE]shared_{i}" for i in range(self.num_shared_experts)]
             private_names = [f"[PRIV-{task}]private_{i}" for i in range(self.num_specific_experts[task])]
             self._expert_names[task] = shared_names + private_names
+
+    def _build_multi_layer_ple(
+        self,
+        ple_cfg: Dict[str, Any],
+        tasks: List[str],
+        in_dim: int,
+        num_layers: int,
+    ) -> None:
+        """
+        多层PLE（L层堆叠）。
+        
+        配置示例：
+          ple:
+            num_ple_layers: 2
+            layer1:
+              shared_num_experts: 4
+              specific_num_experts: {ctr: 1, cvr: 1}
+              expert_mlp_dims: [128]
+            layer2:
+              shared_num_experts: 4
+              specific_num_experts: {ctr: 1, cvr: 1}
+              expert_mlp_dims: [128]
+        
+        说明：
+          - 每层都有独立的 shared + specific experts
+          - 每层的输入是前一层的输出（经过gate混合）
+          - Gate稳定化应用于所有层
+        """
+        self.num_ple_layers = num_layers
+        self.expert_layers = nn.ModuleList()
+        
+        logger.info(f"[PLE] Building {num_layers}-layer PLE structure")
+        
+        layer_in_dim = in_dim
+        
+        for layer_idx in range(num_layers):
+            layer_name = f"layer{layer_idx + 1}"
+            layer_cfg_raw = ple_cfg.get(layer_name, {})
+            
+            if not layer_cfg_raw:
+                raise ValueError(f"num_ple_layers={num_layers} but config.{layer_name} not found")
+            
+            # 解析该层的配置
+            num_shared = int(layer_cfg_raw.get("shared_num_experts", 4))
+            
+            specific_cfg = layer_cfg_raw.get("specific_num_experts", {})
+            if isinstance(specific_cfg, int):
+                num_private = {task: specific_cfg for task in tasks}
+            else:
+                default = int(specific_cfg.get("default", 1))
+                num_private = {
+                    task: int(specific_cfg.get(task, default)) for task in tasks
+                }
+            
+            expert_mlp_dims = list(layer_cfg_raw.get("expert_mlp_dims", []))
+            expert_dropout = float(layer_cfg_raw.get("dropout", 0.0))
+            expert_activation = str(layer_cfg_raw.get("activation", "relu"))
+            expert_use_bn = bool(layer_cfg_raw.get("use_bn", False))
+            
+            layer_cfg = {
+                "in_dim": layer_in_dim,
+                "num_shared": num_shared,
+                "num_private": num_private,
+                "expert_mlp_dims": expert_mlp_dims,
+                "expert_dropout": expert_dropout,
+                "expert_activation": expert_activation,
+                "expert_use_bn": expert_use_bn,
+            }
+            
+            layer_module = self._build_ple_layer(layer_cfg, tasks, layer_idx=layer_idx)
+            self.expert_layers.append(layer_module)
+            
+            # 下一层的输入维度 = 当前层的输出维度
+            layer_in_dim = layer_module.out_dim
+            
+            logger.info(
+                f"[PLE Layer {layer_idx + 1}] "
+                f"in_dim={layer_cfg['in_dim']}, "
+                f"shared={num_shared}, "
+                f"private={num_private}, "
+                f"expert_mlp_dims={expert_mlp_dims}"
+            )
+        
+        # 保存最后一层的专家信息，兼容单层接口
+        last_layer = self.expert_layers[-1]
+        self.num_shared_experts = last_layer.num_shared
+        self.num_specific_experts = last_layer.num_private
+        self.shared_experts = last_layer.shared_experts
+        self.specific_experts = last_layer.specific_experts
+        
+        # 存储专家名称（多层时只记录最后一层）
+        self._expert_names: Dict[str, List[str]] = {}
+        for task in tasks:
+            shared_names = [f"[L{num_layers}]shared_{i}" for i in range(self.num_shared_experts)]
+            private_names = [f"[L{num_layers}-{task}]private_{i}" for i in range(self.num_specific_experts[task])]
+            self._expert_names[task] = shared_names + private_names
+
+    def _build_ple_layer(
+        self,
+        layer_cfg: Dict[str, Any],
+        tasks: List[str],
+        layer_idx: int,
+    ) -> nn.Module:
+        """
+        构建单个PLE层（包含shared + specific experts + gates）。
+        
+        返回一个包含以下属性的Module：
+          - shared_experts: ModuleList
+          - specific_experts: ModuleDict[task] -> ModuleList
+          - gates: ModuleDict[task] -> Gate
+          - num_shared: int
+          - num_private: Dict[task, int]
+          - out_dim: int (输出维度，等于in_dim)
+          - layer_idx: int
+        """
+        in_dim = int(layer_cfg["in_dim"])
+        num_shared = int(layer_cfg["num_shared"])
+        num_private = layer_cfg["num_private"]  # Dict[task, int]
+        expert_mlp_dims = list(layer_cfg["expert_mlp_dims"])
+        expert_dropout = float(layer_cfg["expert_dropout"])
+        expert_activation = str(layer_cfg["expert_activation"])
+        expert_use_bn = bool(layer_cfg["expert_use_bn"])
+        
+        # 构建该层的Module
+        class PLELayerModule(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.num_shared = num_shared
+                self.num_private = num_private
+                self.out_dim = in_dim
+                self.layer_idx = layer_idx
+        
+        layer_module = PLELayerModule()
+        
+        # 构建 shared experts
+        shared_experts_list = nn.ModuleList()
+        for i in range(num_shared):
+            expert = MLP(
+                input_dim=in_dim,
+                hidden_dims=expert_mlp_dims,
+                activation=expert_activation,
+                dropout=expert_dropout,
+                use_bn=expert_use_bn,
+            )
+            shared_experts_list.append(expert)
+        
+        layer_module.shared_experts = shared_experts_list
+        
+        # 构建 task-specific experts
+        specific_experts_dict = nn.ModuleDict()
+        for task in tasks:
+            num_task_private = num_private.get(task, 1)
+            task_experts_list = nn.ModuleList()
+            for i in range(num_task_private):
+                expert = MLP(
+                    input_dim=in_dim,
+                    hidden_dims=expert_mlp_dims,
+                    activation=expert_activation,
+                    dropout=expert_dropout,
+                    use_bn=expert_use_bn,
+                )
+                task_experts_list.append(expert)
+            specific_experts_dict[task] = task_experts_list
+        
+        layer_module.specific_experts = specific_experts_dict
+        
+        # 构建gates（复用现有_GatePLE）
+        gates_dict = nn.ModuleDict()
+        gate_type = str(self.ple_cfg.get("gate_type", "linear"))
+        gate_hidden_dims = self.ple_cfg.get("gate_hidden_dims")
+        
+        for task in tasks:
+            num_experts_for_task = num_shared + num_private.get(task, 1)
+            gate = _GatePLE(
+                in_dim=in_dim,
+                num_experts=num_experts_for_task,
+                gate_type=gate_type,
+                hidden_dims=gate_hidden_dims,
+                temperature=self.gate_temperature if self.gate_stabilize_enabled else 1.0,
+                noise_std=self.gate_noise_std if self.gate_stabilize_enabled else 0.0,
+            )
+            gates_dict[task] = gate
+        
+        layer_module.gates = gates_dict
+        
+        return layer_module
 
     def _build_hetero_experts(
         self,
@@ -695,7 +929,7 @@ class PLE(nn.Module):
 
     def forward(self, features: Dict, dense_x: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         """
-        PLE forward pass.
+        PLE forward pass (支持单层/多层)。
         
         与 mmoe.py forward 输出格式一致：
           - per-task logits: results[task] = [B]
@@ -712,9 +946,14 @@ class PLE(nn.Module):
         base_x = self._select_input(features, out)
         base_x = self.layernorm(base_x)
 
-        # ========== 计算 shared experts 输出（一次计算，所有任务共享）==========
-        shared_expert_outputs = [expert(base_x) for expert in self.shared_experts]
-
+        # ========== 多层PLE处理 ==========
+        if self.num_ple_layers == 1:
+            # 单层：使用现有逻辑
+            task_mixed_repr = self._forward_single_layer(base_x, results)
+        else:
+            # 多层：逐层传播
+            task_mixed_repr = self._forward_multi_layer(base_x, results)
+        
         # ========== 获取 wide/fm logit ==========
         wide_logit = out.get("logit_linear")
         fm_logit = out.get("fm_logit")
@@ -722,64 +961,20 @@ class PLE(nn.Module):
             wide_logit = wide_logit.squeeze(-1)
         if fm_logit is not None and fm_logit.dim() == 2 and fm_logit.size(-1) == 1:
             fm_logit = fm_logit.squeeze(-1)
-
-        # 用于 health monitoring
-        gate_weights_dict: Dict[str, torch.Tensor] = {}
-
-        # 用于 gate 正则化（保留梯度）
-        gate_weights_for_reg: List[torch.Tensor] = []
-        gate_num_shared_list: List[int] = []  # 记录每个任务的 shared experts 数量（用于 shared_only scope）
-
-        # ============================================================
-        # Residual Head: 保存 CVR 分支 PLE 混合表征, 用于残差修正
-        # ============================================================
+        
+        # ========== Task Heads：将PLE输出转换为logits ==========
         cvr_ple_repr: Optional[torch.Tensor] = None
-
-        # ========== 计算当前 step 的 temperature/noise_std（支持 schedule）==========
-        current_temp, current_noise = self._get_scheduled_gate_params()
-
-        # ========== 遍历每个任务 ==========
+        
         for task, head in self.towers.items():
             if task not in self.enabled_heads:
                 continue
-
-            # 计算该任务的 specific experts 输出
-            specific_expert_outputs = [expert(base_x) for expert in self.specific_experts[task]]
-
-            # 拼接所有 expert 输出：[shared..., specific...]
-            # 顺序：shared experts 在前，task-specific experts 在后
-            all_expert_outputs = shared_expert_outputs + specific_expert_outputs
-
-            # 获取 gate 权重（支持动态 temperature/noise_std）
-            gate = self.gates[task]
-            gate_w = gate(base_x, temperature_override=current_temp, noise_std_override=current_noise)  # [B, K]
-
-            # 存储用于正则化（保留梯度）
-            if self.gate_stabilize_enabled and self.training:
-                gate_weights_for_reg.append(gate_w)
-                gate_num_shared_list.append(self.num_shared_experts)
-
-            # 存储 gate 权重用于 health monitoring
-            if self.log_gates:
-                gate_weights_dict[task] = gate_w.detach()
-
-            # ========== Mixing：加权求和 ==========
-            # stacked: [B, D, K]
-            stacked = torch.stack(all_expert_outputs, dim=2)
             
-            # ========== 异构专家输出对齐（仅在启用时生效）==========
-            if self._expert_output_aligner is not None:
-                stacked = self._expert_output_aligner(task, stacked)
+            mixed = task_mixed_repr[task]
             
-            # gate_w: [B, K] -> [B, K, 1]
-            weights = gate_w.unsqueeze(-1)  # [B, K, 1]
-            # bmm: [B, D, K] @ [B, K, 1] -> [B, D, 1] -> squeeze -> [B, D]
-            mixed = torch.bmm(stacked, weights).squeeze(-1)
-
             # 捕获 CVR 分支的 PLE 混合输出, 供 ResidualHead 使用
             if task == "cvr" and self.residual_head is not None:
                 cvr_ple_repr = mixed
-
+            
             # 通过 task head 获取 logit
             task_logit = head(mixed)
 
@@ -824,8 +1019,85 @@ class PLE(nn.Module):
             r_logit = self.residual_head(res_input)  # [B, 1]
             results["residual_logit"] = r_logit
 
-        # ========== 合并 aux 并添加 gate 相关信息 ==========
+        # ========== 合并 aux ==========
         aux = dict(out.get("aux", {})) if "aux" in out else {}
+        if "_aux_from_layers" in results:
+            # 多层PLE的aux信息已经在_forward_multi_layer中计算
+            layer_aux = results.pop("_aux_from_layers")
+            aux.update(layer_aux)
+        
+        if aux:
+            results["aux"] = aux
+
+        return results
+
+    def _forward_single_layer(
+        self,
+        base_x: torch.Tensor,
+        results: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        """
+        单层PLE forward (现有逻辑)。
+        
+        返回：Dict[task, mixed_repr]  # 每个任务的混合表征
+        """
+        # ========== 计算 shared experts 输出（一次计算，所有任务共享）==========
+        shared_expert_outputs = [expert(base_x) for expert in self.shared_experts]
+
+        # 用于 health monitoring
+        gate_weights_dict: Dict[str, torch.Tensor] = {}
+
+        # 用于 gate 正则化（保留梯度）
+        gate_weights_for_reg: List[torch.Tensor] = []
+        gate_num_shared_list: List[int] = []  # 记录每个任务的 shared experts 数量（用于 shared_only scope）
+
+        # ========== 计算当前 step 的 temperature/noise_std（支持 schedule）==========
+        current_temp, current_noise = self._get_scheduled_gate_params()
+
+        # ========== 遍历每个任务 ==========
+        task_mixed_repr = {}
+        
+        for task in self.tasks:
+            if task not in self.enabled_heads:
+                continue
+
+            # 计算该任务的 specific experts 输出
+            specific_expert_outputs = [expert(base_x) for expert in self.specific_experts[task]]
+
+            # 拼接所有 expert 输出：[shared..., specific...]
+            # 顺序：shared experts 在前，task-specific experts 在后
+            all_expert_outputs = shared_expert_outputs + specific_expert_outputs
+
+            # 获取 gate 权重（支持动态 temperature/noise_std）
+            gate = self.gates[task]
+            gate_w = gate(base_x, temperature_override=current_temp, noise_std_override=current_noise)  # [B, K]
+
+            # 存储用于正则化（保留梯度）
+            if self.gate_stabilize_enabled and self.training:
+                gate_weights_for_reg.append(gate_w)
+                gate_num_shared_list.append(self.num_shared_experts)
+
+            # 存储 gate 权重用于 health monitoring
+            if self.log_gates:
+                gate_weights_dict[task] = gate_w.detach()
+
+            # ========== Mixing：加权求和 ==========
+            # stacked: [B, D, K]
+            stacked = torch.stack(all_expert_outputs, dim=2)
+            
+            # ========== 异构专家输出对齐（仅在启用时生效）==========
+            if self._expert_output_aligner is not None:
+                stacked = self._expert_output_aligner(task, stacked)
+            
+            # gate_w: [B, K] -> [B, K, 1]
+            weights = gate_w.unsqueeze(-1)  # [B, K, 1]
+            # bmm: [B, D, K] @ [B, K, 1] -> [B, D, 1] -> squeeze -> [B, D]
+            mixed = torch.bmm(stacked, weights).squeeze(-1)
+            
+            task_mixed_repr[task] = mixed
+
+        # ========== 合并 aux 并添加 gate 相关信息 ==========
+        aux = {}
         if self.log_gates and gate_weights_dict:
             aux["gates"] = gate_weights_dict
             
@@ -864,11 +1136,128 @@ class PLE(nn.Module):
                 _, mass_floor_metrics = self._compute_shared_mass_floor_loss(gate_weights_dict)
                 for k, v in mass_floor_metrics.items():
                     aux[k] = v
+        
+        # 将aux保存到results中（会在forward中合并）
+        results["_aux_from_layers"] = aux
+        
+        return task_mixed_repr
 
-        if aux:
-            results["aux"] = aux
-
-        return results
+    def _forward_multi_layer(
+        self,
+        base_x: torch.Tensor,
+        results: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        """
+        多层PLE forward。
+        
+        逐层执行，每层输入是前一层的输出。
+        返回：Dict[task, mixed_repr]  # 最后一层每个任务的混合表征
+        """
+        # 用于收集所有层的gate weights和正则化
+        all_gate_weights_dict: Dict[str, List[torch.Tensor]] = {task: [] for task in self.tasks if task in self.enabled_heads}
+        all_gate_weights_for_reg: List[torch.Tensor] = []
+        all_gate_num_shared_list: List[int] = []
+        
+        # ========== 计算当前 step 的 temperature/noise_std（支持 schedule）==========
+        current_temp, current_noise = self._get_scheduled_gate_params()
+        
+        # 逐层执行
+        layer_input = {task: base_x for task in self.tasks if task in self.enabled_heads}
+        
+        for layer_idx, layer_module in enumerate(self.expert_layers):
+            next_layer_input = {}
+            
+            for task in self.tasks:
+                if task not in self.enabled_heads:
+                    continue
+                
+                task_input = layer_input[task]
+                
+                # 计算该任务该层的shared experts输出
+                shared_outputs = [expert(task_input) for expert in layer_module.shared_experts]
+                
+                # 计算该任务该层的specific experts输出
+                specific_outputs = [expert(task_input) for expert in layer_module.specific_experts[task]]
+                
+                # 拼接
+                all_outputs = shared_outputs + specific_outputs
+                
+                # Gate
+                gate = layer_module.gates[task]
+                gate_w = gate(task_input, temperature_override=current_temp, noise_std_override=current_noise)  # [B, K]
+                
+                # 收集gate权重
+                if self.log_gates:
+                    all_gate_weights_dict[task].append(gate_w.detach())
+                
+                # 存储用于正则化
+                if self.gate_stabilize_enabled and self.training:
+                    all_gate_weights_for_reg.append(gate_w)
+                    all_gate_num_shared_list.append(layer_module.num_shared)
+                
+                # 混合
+                stacked = torch.stack(all_outputs, dim=2)  # [B, D, K]
+                
+                # 异构专家输出对齐（如果启用）
+                if self._expert_output_aligner is not None:
+                    stacked = self._expert_output_aligner(task, stacked)
+                
+                weights = gate_w.unsqueeze(-1)  # [B, K, 1]
+                mixed = torch.bmm(stacked, weights).squeeze(-1)  # [B, D]
+                
+                # 保存该任务在该层的输出，作为下一层输入
+                next_layer_input[task] = mixed
+            
+            layer_input = next_layer_input
+        
+        # 最后一层的输出用于task head
+        task_mixed_repr = layer_input
+        
+        # ========== 合并所有层的aux信息 ==========
+        aux = {}
+        
+        if self.log_gates and all_gate_weights_dict:
+            # 记录每层的gate权重（仅最后一层的）
+            gate_weights_dict = {task: weights[-1] for task, weights in all_gate_weights_dict.items()}
+            aux["gates"] = gate_weights_dict
+            
+            # 新增：计算 per-expert routing metrics
+            if hasattr(self, "_expert_names") and self._expert_names:
+                expert_metrics = self._compute_expert_routing_metrics(gate_weights_dict)
+                for k, v in expert_metrics.items():
+                    aux[k] = v
+        
+        # ========== 计算 gate 正则化损失（所有层累加）==========
+        if self.gate_stabilize_enabled and self.training and all_gate_weights_for_reg:
+            gate_reg_loss, gate_entropy_mean, gate_lb_kl = self._compute_gate_reg(
+                all_gate_weights_for_reg, all_gate_num_shared_list
+            )
+            aux["gate_reg_loss"] = gate_reg_loss
+            aux["gate_entropy_mean"] = gate_entropy_mean.detach()
+            aux["gate_lb_kl"] = gate_lb_kl.detach()
+        
+        # ========== 计算 shared mass floor 正则化损失 ==========
+        if self.mass_floor_enabled and all_gate_weights_dict:
+            # 只对最后一层计算mass floor
+            last_layer_gate_weights = {task: weights[-1] for task, weights in all_gate_weights_dict.items()}
+            if self.training:
+                mass_floor_loss, mass_floor_metrics = self._compute_shared_mass_floor_loss(last_layer_gate_weights)
+                if "gate_reg_loss" in aux:
+                    aux["gate_reg_loss"] = aux["gate_reg_loss"] + mass_floor_loss
+                else:
+                    aux["gate_reg_loss"] = mass_floor_loss
+                aux["gate_shared_mass_floor_loss"] = mass_floor_loss.detach()
+                for k, v in mass_floor_metrics.items():
+                    aux[k] = v
+            else:
+                _, mass_floor_metrics = self._compute_shared_mass_floor_loss(last_layer_gate_weights)
+                for k, v in mass_floor_metrics.items():
+                    aux[k] = v
+        
+        # 将aux保存到results中（会在forward中合并）
+        results["_aux_from_layers"] = aux
+        
+        return task_mixed_repr
 
     def _compute_gate_reg(
         self,

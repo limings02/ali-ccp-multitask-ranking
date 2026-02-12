@@ -269,6 +269,9 @@ def train_one_epoch(
     lr_scheduler_enabled = lr_scheduler_bundle is not None and lr_scheduler_bundle.enabled
     last_logged_lr: Dict[str, float] = {}
     ctr_scaled_count = cvr_scaled_count = 0
+    
+    # ===== Data cursor tracking for resume =====
+    data_state_updates: Dict[int, Dict] = {}  # Maps worker_id -> {last_row_id, batch_size, ...}
 
     # Performance monitoring
     data_load_time = 0.0
@@ -671,6 +674,12 @@ def train_one_epoch(
                 if grad_sampler is not None:
                     grad_sampler.record_error(current_global_step)
                 optimizer_bundle.zero_grad(set_to_none=True)
+        
+        # ===== Collect data cursor for resume support =====
+        if isinstance(meta, dict) and "_data_cursor" in meta:
+            cursor_info = meta["_data_cursor"]
+            worker_id = cursor_info.get("worker_id", 0)
+            data_state_updates[worker_id] = cursor_info
 
         if (step + 1) % log_every == 0:
             elapsed = time.time() - t_start
@@ -949,6 +958,8 @@ def train_one_epoch(
         **lr_metrics,
         **clip_schedule_metrics,
         **gate_metrics,
+        # ===== Include data state for resume support =====
+        "data_state": {"data_state": data_state_updates} if data_state_updates else None,
     }
 
 

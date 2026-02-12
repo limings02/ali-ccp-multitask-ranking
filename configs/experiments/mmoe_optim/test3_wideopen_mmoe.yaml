@@ -1,5 +1,5 @@
 experiment:
-  name: "allopen_mmoe"
+  name: "wideopen_mmoe"
 
 # =============================================================================
 # 实验说明（配置级）
@@ -105,7 +105,7 @@ model:
     return_logit_parts: true
     # 每个任务是否叠加 wide/fm 项（MMoE/SharedBottom 同逻辑）
     per_head_add:
-      ctr: { use_wide: true, use_fm: true }
+      ctr: { use_wide: true, use_fm: false }
       cvr: { use_wide: false, use_fm: false }
     # deep MLP 结构
     deep_hidden_dims: [128, 64]

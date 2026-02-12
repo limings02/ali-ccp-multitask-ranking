@@ -156,11 +156,13 @@ class EmbeddingBagBatchCollator:
       - Cache field planning (base -> idx/val/meta) once per worker.
       - Pre-allocate numpy arrays by total nnz per field (avoid repeated list.extend).
       - Use torch.from_numpy to avoid Python-list tensor construction overhead.
+    Supports enable_data_cursor to record batch position for resume.
     """
 
-    def __init__(self, feature_meta: Dict[str, Any], debug: bool = False) -> None:
+    def __init__(self, feature_meta: Dict[str, Any], debug: bool = False, enable_data_cursor: bool = False) -> None:
         self.feature_meta = feature_meta
         self.debug = debug
+        self.enable_data_cursor = enable_data_cursor
         self._field_plans: List[_FieldPlan] | None = None
         self._field_names: List[str] | None = None
         self._any_use_value: bool = False
@@ -325,6 +327,19 @@ class EmbeddingBagBatchCollator:
                 "field_names": field_names,
             }
             meta_out["_perf"] = {"collate_ms": (time.perf_counter() - t0) * 1000.0}
+            
+            # ===== Record data cursor for resume support =====
+            if self.enable_data_cursor and rows:
+                info = get_worker_info()
+                worker_id = info.id if info is not None else 0
+                # Record the last row's original row_id for this batch
+                last_row = rows[-1]
+                meta_out["_data_cursor"] = {
+                    "worker_id": worker_id,
+                    "last_row_id": int(last_row.get("row_id", -1)),
+                    "batch_size": len(rows),
+                }
+            
             return labels, features, meta_out
 
 
@@ -437,10 +452,16 @@ def make_dataloader(
     subset_seed: int | None = None,
     prefetch_factor: int | None = None,
     worker_cpu_threads: int = 1,
+    resume_state: Optional[Dict] = None,
+    enable_data_cursor: bool = False,
 ) -> DataLoader:
     """
     Build a DataLoader that yields (labels, features, meta) tuples
     suitable for EmbeddingBag-based models.
+    
+    Args:
+        resume_state: Dict from DatasetResumeState.to_dict() for checkpoint recovery
+        enable_data_cursor: If True, collator records batch cursor position for dataset resume
     """
     if split not in {"train", "valid"}:
         raise ValueError("split must be 'train' or 'valid'")
@@ -457,10 +478,17 @@ def make_dataloader(
     if shuffle:
         raise ValueError("shuffle=True is not supported with IterableDataset; shuffle offline instead.")
 
+    # ===== Restore DatasetResumeState if provided =====
+    from src.data.dataset import DatasetResumeState
+    resume_state_obj = None
+    if resume_state is not None:
+        resume_state_obj = DatasetResumeState.from_dict(resume_state)
+
     ds: IterableDataset = ProcessedIterDataset(
         data_dir,
         metadata_path=metadata_path,
         neg_keep_prob=neg_keep_prob_train if split == "train" else 1.0,
+        resume_state=resume_state_obj,
     )
     if split == "valid" and (subset_ratio is not None or subset_max_samples is not None):
         ds = _SubsetIterDataset(
@@ -476,7 +504,9 @@ def make_dataloader(
         if num_workers > 0
         else None
     )
-    collator = EmbeddingBagBatchCollator(feature_meta=fm, debug=debug)
+    
+    # ===== Use enable_data_cursor parameter =====
+    collator = EmbeddingBagBatchCollator(feature_meta=fm, debug=debug, enable_data_cursor=enable_data_cursor)
     collate = partial(_collate_embeddingbag, collator=collator)
 
     # Determine prefetch_factor: for high worker counts, prefetch 4 is usually better.
