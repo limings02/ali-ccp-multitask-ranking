@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
-from typing import Any, Dict, List
+import logging
+import math
+from typing import Any, Dict
 
 import torch.nn as nn
 
@@ -10,12 +12,15 @@ from src.models.backbones.deepfm import DeepFMBackbone
 from src.models.mtl.shared_bottom import SharedBottom
 from src.models.mtl.mmoe import MMoE
 from src.models.mtl.ple import PLE
-from src.utils.config import load_yaml
 
 try:
     from src.utils.feature_meta import build_model_feature_meta
 except ImportError:  # pragma: no cover - fallback if module missing
     build_model_feature_meta = None
+
+
+logger = logging.getLogger(__name__)
+_PRIOR_EPS = 1e-8
 
 
 def _resolve_feature_meta(cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -31,24 +36,92 @@ def _resolve_feature_meta(cfg: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     return build_model_feature_meta(metadata_path, embedding_cfg)
 
 
-def _load_label_priors(cfg: Dict[str, Any]) -> Dict[str, float]:
-    """
-    Read train split positive rates from metadata.json for bias init.
-    Falls back to empty dict if missing.
-    """
+def _clip_prior(prob: float, eps: float = _PRIOR_EPS) -> float:
+    prob = float(prob)
+    if not math.isfinite(prob):
+        raise ValueError(f"Invalid prior value: {prob}")
+    return min(max(prob, eps), 1.0 - eps)
+
+
+def _safe_read_rate(train_stats: Dict[str, Any], key: str) -> float | None:
+    value = train_stats.get(key)
+    if value is None:
+        return None
     try:
-        data_cfg = cfg.get("data", {})
-        metadata_path = Path(data_cfg["metadata_path"])
-        with metadata_path.open("r", encoding="utf-8") as f:
-            meta = json.load(f)
-        train_stats = meta.get("split_stats", {}).get("train", {})
-        priors = {}
-        if "ctr" in train_stats:
-            priors["ctr"] = float(train_stats["ctr"])
-        if "cvr" in train_stats:
-            priors["cvr"] = float(train_stats["cvr"])
+        return float(value)
+    except (TypeError, ValueError):
+        logger.warning("compute_head_priors: split_stats.train.%s=%r is not a valid float; ignored.", key, value)
+        return None
+
+
+def compute_head_priors(cfg: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, float]:
+    """
+    Compute head priors (probabilities) for output-layer bias initialization.
+
+    ESMM semantics:
+      - ctr head predicts P(click)
+      - ctcvr head predicts P(click & conv)
+      - cvr head predicts P(conv | click), so prior must be P(click & conv) / P(click)
+
+    Metadata compatibility:
+      - Prefer split_stats.train.ctcvr as exposure-level P(click & conv)
+      - Fallback to split_stats.train.cvr as legacy exposure-level ctcvr alias
+    """
+    train_stats = ((metadata or {}).get("split_stats") or {}).get("train", {}) or {}
+    use_esmm = bool(cfg.get("use_esmm", False))
+
+    train_ctr_rate = _safe_read_rate(train_stats, "ctr")
+    train_cvr_rate = _safe_read_rate(train_stats, "cvr")
+    train_ctcvr_rate = _safe_read_rate(train_stats, "ctcvr")
+    priors: Dict[str, float] = {}
+
+    if use_esmm:
+        if train_ctcvr_rate is None and train_cvr_rate is not None:
+            train_ctcvr_rate = train_cvr_rate
+            logger.warning(
+                "compute_head_priors: split_stats.train.ctcvr missing; fallback to split_stats.train.cvr "
+                "as exposure-level P(click&conv) for ESMM backward compatibility."
+            )
+
+        if train_ctr_rate is not None:
+            priors["ctr"] = _clip_prior(train_ctr_rate)
+        if train_ctcvr_rate is not None:
+            priors["ctcvr"] = _clip_prior(train_ctcvr_rate)
+
+        if train_ctr_rate is not None and train_ctcvr_rate is not None:
+            # ESMM: CVR head target is P(conv|click), not exposure-level P(click&conv).
+            cvr_click_rate = train_ctcvr_rate / max(train_ctr_rate, _PRIOR_EPS)
+            priors["cvr"] = _clip_prior(cvr_click_rate)
+        elif train_ctcvr_rate is not None:
+            # Last-resort fallback when ctr rate is unavailable.
+            priors["cvr"] = _clip_prior(train_ctcvr_rate)
+            logger.warning(
+                "compute_head_priors: split_stats.train.ctr missing; cannot derive P(conv|click). "
+                "Fallback sets cvr prior to exposure-level P(click&conv)."
+            )
         return priors
-    except Exception:
+
+    if train_ctr_rate is not None:
+        priors["ctr"] = _clip_prior(train_ctr_rate)
+    if train_cvr_rate is not None:
+        priors["cvr"] = _clip_prior(train_cvr_rate)
+    if train_ctcvr_rate is not None:
+        priors["ctcvr"] = _clip_prior(train_ctcvr_rate)
+    return priors
+
+
+def _load_metadata(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    data_cfg = cfg.get("data", {})
+    metadata_path_val = data_cfg.get("metadata_path")
+    if not metadata_path_val:
+        return {}
+
+    metadata_path = Path(metadata_path_val)
+    try:
+        with metadata_path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:
+        logger.warning("Failed to load metadata for priors from %s: %s", metadata_path, exc)
         return {}
 
 
@@ -94,12 +167,12 @@ def build_model(cfg: Dict[str, Any], feature_map: Dict[str, Any] | None = None, 
     """
     model_cfg = cfg.get("model", {})
     enabled_heads = model_cfg.get("enabled_heads") or ["ctr", "cvr"]
-    name = model_cfg.get("name") or "deepfm_shared_bottom"
     mtl = str(model_cfg.get("mtl", "sharedbottom")).lower()
 
     feature_meta = _resolve_feature_meta(cfg)
     backbone = _build_backbone(cfg, feature_meta)
-    label_priors = _load_label_priors(cfg)
+    metadata = meta if isinstance(meta, dict) and meta else _load_metadata(cfg)
+    label_priors = compute_head_priors(cfg, metadata)
 
     head_cfg = model_cfg.get("heads", {})
     head_cfg.setdefault("tasks", model_cfg.get("tasks", ["ctr", "cvr"]))
@@ -165,4 +238,4 @@ def build_model(cfg: Dict[str, Any], feature_map: Dict[str, Any] | None = None, 
     raise ValueError(f"Unsupported model.mtl '{mtl}'. Expected 'sharedbottom', 'mmoe', or 'ple'.")
 
 
-__all__ = ["build_model"]
+__all__ = ["build_model", "compute_head_priors"]

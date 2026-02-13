@@ -85,11 +85,25 @@ def load_checkpoint(
 
     if optimizer is not None:
         if "optimizers" in chkpt and hasattr(optimizer, "load_state_dict"):
-            optimizer.load_state_dict(chkpt["optimizers"])
-            logger.info("load_checkpoint: loaded optimizer bundle (dense%s)", " + sparse" if chkpt["optimizers"].get("sparse") is not None else "")
+            try:
+                optimizer.load_state_dict(chkpt["optimizers"])
+                logger.info("load_checkpoint: loaded optimizer bundle (dense%s)", " + sparse" if chkpt["optimizers"].get("sparse") is not None else "")
+            except Exception as exc:
+                logger.warning(
+                    "load_checkpoint: failed to restore optimizer bundle state (%s); "
+                    "skip optimizer state restore and continue with freshly initialized optimizer.",
+                    exc,
+                )
         elif "optimizer" in chkpt and hasattr(optimizer, "load_state_dict"):
-            optimizer.load_state_dict(chkpt["optimizer"])
-            logger.info("load_checkpoint: loaded legacy optimizer into dense slot")
+            try:
+                optimizer.load_state_dict(chkpt["optimizer"])
+                logger.info("load_checkpoint: loaded legacy optimizer into dense slot")
+            except Exception as exc:
+                logger.warning(
+                    "load_checkpoint: failed to restore legacy optimizer state (%s); "
+                    "skip optimizer state restore and continue with freshly initialized optimizer.",
+                    exc,
+                )
         else:
             logger.warning("load_checkpoint: no optimizer state found in checkpoint.")
 

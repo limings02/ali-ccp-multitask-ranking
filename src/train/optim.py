@@ -70,19 +70,31 @@ class OptimizerBundle:
         return self.scaler.state_dict()
 
     def load_state_dict(self, state: Dict[str, Any]) -> None:
+        def _safe_load(opt: Optional[Optimizer], opt_state: Any, name: str) -> None:
+            if opt is None:
+                return
+            if opt_state is None:
+                logger.warning("OptimizerBundle.load_state_dict: %s optimizer state missing/None.", name)
+                return
+            try:
+                opt.load_state_dict(opt_state)
+            except Exception as exc:
+                logger.warning(
+                    "OptimizerBundle.load_state_dict: failed to load %s optimizer state (%s). "
+                    "Continue with freshly initialized %s optimizer.",
+                    name,
+                    exc,
+                    name,
+                )
+
         if "dense" in state or "sparse" in state:
-            if self.dense_opt is not None and state.get("dense") is not None:
-                self.dense_opt.load_state_dict(state["dense"])
-            elif "dense" in state and state.get("dense") is None:
-                logger.warning("OptimizerBundle.load_state_dict: dense optimizer state missing/None.")
-            if self.sparse_opt is not None and state.get("sparse") is not None:
-                self.sparse_opt.load_state_dict(state["sparse"])
-            elif self.sparse_opt is not None and "sparse" in state:
-                logger.warning("OptimizerBundle.load_state_dict: sparse optimizer state missing/None.")
+            _safe_load(self.dense_opt, state.get("dense"), "dense")
+            if "sparse" in state:
+                _safe_load(self.sparse_opt, state.get("sparse"), "sparse")
             return
         if "optimizer" in state and self.dense_opt is not None:
             logger.warning("OptimizerBundle.load_state_dict: loading legacy 'optimizer' into dense slot.")
-            self.dense_opt.load_state_dict(state["optimizer"])
+            _safe_load(self.dense_opt, state.get("optimizer"), "dense")
 
     def load_scaler_state(self, state: Optional[Dict[str, Any]]) -> None:
         if self.scaler is None or state is None:
@@ -97,14 +109,58 @@ class OptimizerBundle:
 logger = logging.getLogger(__name__)
 
 
-def _make_adamw(params: Iterable[nn.Parameter], cfg: Dict[str, Any]) -> Optimizer:
+def _make_adamw(params: Any, cfg: Dict[str, Any]) -> Optimizer:
     return optim.AdamW(
         params,
         lr=float(cfg.get("lr", 1e-3)),
-        weight_decay=float(cfg.get("weight_decay", 0.0)),
+        # Per-group weight_decay is set explicitly (decay/no_decay groups).
+        weight_decay=0.0,
         betas=tuple(cfg.get("betas", (0.9, 0.999))),
         eps=float(cfg.get("eps", 1e-8)),
     )
+
+
+def _is_no_decay_param(name: str, param: nn.Parameter) -> bool:
+    """
+    AdamW no_decay convention:
+    - bias parameters should not be decayed (prevents intercept drift)
+    - norm parameters should not be decayed (common stable practice)
+    """
+    name_low = name.lower()
+    if name_low.endswith(".bias"):
+        return True
+    if param.ndim == 1:
+        return True
+    if "layernorm" in name_low or "norm" in name_low or "bn" in name_low:
+        return True
+    return False
+
+
+def _build_dense_param_groups(
+    named_params: list[tuple[str, nn.Parameter]],
+    weight_decay: float,
+) -> tuple[list[Dict[str, Any]], int, int]:
+    decay_params: list[nn.Parameter] = []
+    no_decay_params: list[nn.Parameter] = []
+
+    for name, param in named_params:
+        if _is_no_decay_param(name, param):
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    param_groups: list[Dict[str, Any]] = []
+    if decay_params:
+        param_groups.append({"params": decay_params, "weight_decay": float(weight_decay)})
+    if no_decay_params:
+        param_groups.append({"params": no_decay_params, "weight_decay": 0.0})
+
+    if not param_groups:
+        raise ValueError("No trainable dense parameters found for optimizer.")
+    if not no_decay_params:
+        logger.warning("[optim] no_decay group is empty; all dense params use weight decay.")
+
+    return param_groups, len(decay_params), len(no_decay_params)
 
 
 def _split_sparse_dense_params(model: nn.Module) -> Tuple[list[nn.Parameter], list[nn.Parameter]]:
@@ -174,12 +230,25 @@ def build_optimizer_bundle(cfg: Dict[str, Any], model: nn.Module, scaler: Option
             )
             sparse_effective = True
 
-    dense_target_params = dense_params if sparse_opt is not None else model.parameters()
-    dense_opt = _make_adamw(dense_target_params, dense_cfg)
+    if sparse_opt is not None:
+        dense_ids = {id(p) for p in dense_params}
+        dense_target_named_params = [
+            (name, p) for name, p in model.named_parameters() if p.requires_grad and id(p) in dense_ids
+        ]
+    else:
+        dense_target_named_params = [(name, p) for name, p in model.named_parameters() if p.requires_grad]
+
+    dense_target_params = [p for _, p in dense_target_named_params]
+    dense_param_groups, num_decay_group_params, num_no_decay_group_params = _build_dense_param_groups(
+        dense_target_named_params,
+        weight_decay=float(dense_cfg.get("weight_decay", 0.0)),
+    )
+    dense_opt = _make_adamw(dense_param_groups, dense_cfg)
 
     logger.info(
         "[optim] type=%s sparse_enabled_cfg=%s allow_fallback_if_empty=%s "
-        "num_sparse_params=%d num_dense_params=%d num_sparse_elems=%d num_dense_elems=%d sparse_effective=%s dense_lr=%.6g dense_wd=%.3g%s",
+        "num_sparse_params=%d num_dense_params=%d num_sparse_elems=%d num_dense_elems=%d sparse_effective=%s "
+        "dense_lr=%.6g dense_wd=%.3g dense_param_groups=%d decay_group_params=%d no_decay_group_params=%d%s",
         opt_type,
         sparse_enabled_cfg,
         allow_fallback,
@@ -190,12 +259,15 @@ def build_optimizer_bundle(cfg: Dict[str, Any], model: nn.Module, scaler: Option
         sparse_effective,
         float(dense_cfg.get("lr", 1e-3)),
         float(dense_cfg.get("weight_decay", 0.0)),
+        len(dense_opt.param_groups),
+        num_decay_group_params,
+        num_no_decay_group_params,
         f" sparse_lr={float(sparse_cfg.get('lr', 1e-3))}" if sparse_effective else "",
     )
 
     return OptimizerBundle(
         dense_opt=dense_opt,
-        dense_params=dense_params if sparse_opt is not None else list(model.parameters()),
+        dense_params=dense_target_params,
         sparse_opt=sparse_opt,
         sparse_params=sparse_params if sparse_effective else None,
         scaler=scaler,

@@ -93,7 +93,7 @@ class SharedBottom(nn.Module):
             prior = self.head_priors.get(task, prior_map.get(task, 0.5))
             prior = float(prior)
             # Clamp to keep logits finite even when prior=0/1.
-            prior = min(max(prior, 1e-6), 1 - 1e-6)
+            prior = min(max(prior, 1e-8), 1 - 1e-8)
             bias_init = float(torch.log(torch.tensor(prior / (1 - prior))))
             if self.towers[task].out_proj.bias is not None:
                 nn.init.constant_(self.towers[task].out_proj.bias, bias_init)
