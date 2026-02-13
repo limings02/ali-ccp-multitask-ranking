@@ -61,6 +61,13 @@ data/interim/
 data/processed/
 data/splits/
 data/stats/
+# local generated / processed data
+data/vectorized/
+*.bin
+*.parquet
+*.pt
+*.ckpt
+trainer_runs/
 
 # If you want to keep empty dirs tracked, rely on .gitkeep files
 !data/**/.gitkeep
