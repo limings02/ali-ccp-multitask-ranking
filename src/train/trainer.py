@@ -148,11 +148,15 @@ class Trainer:
             self.neg_keep_prob_train,
         )
         data_cfg = cfg.get("data", {})
-        train_workers = int(data_cfg.get("num_workers", 0))
+        default_workers = max(0, min(6, os.cpu_count() or 1))
+        train_workers = int(data_cfg.get("num_workers", default_workers))
         valid_workers = int(data_cfg.get("num_workers_valid", max(1, train_workers // 2)))
+        data_format = str(data_cfg.get("format", "vectorized")).lower()
+        processed_root = str(data_cfg.get("processed_dir", "data/processed"))
+        vectorized_root = str(data_cfg.get("vectorized_dir", "data/vectorized"))
         prefetch_cfg = data_cfg.get("prefetch_factor")
-        train_prefetch = int(prefetch_cfg) if prefetch_cfg is not None else None
-        valid_prefetch = int(prefetch_cfg) if (prefetch_cfg is not None and valid_workers > 0) else None
+        train_prefetch = int(prefetch_cfg) if prefetch_cfg is not None else (4 if train_workers > 0 else None)
+        valid_prefetch = int(prefetch_cfg) if prefetch_cfg is not None else (4 if valid_workers > 0 else None)
         worker_cpu_threads = int(data_cfg.get("worker_cpu_threads", 1))
         persistent_cfg = data_cfg.get("persistent_workers")
         train_persistent = bool(persistent_cfg) if persistent_cfg is not None else (train_workers > 0)
@@ -175,6 +179,10 @@ class Trainer:
             # ===== Resume state for strict checkpoint recovery =====
             resume_state=getattr(self, "data_resume_state", None),
             enable_data_cursor=True,
+            include_entity_id=False,
+            data_format=data_format,
+            processed_root=processed_root,
+            vectorized_root=vectorized_root,
         )
         # Use separate num_workers for validation to avoid memory issues
         # Default to half of train workers or max 2 to prevent OOM with persistent_workers
@@ -191,6 +199,10 @@ class Trainer:
             debug=bool(cfg["data"].get("debug", False) or self.debug_dataloader_assert),
             prefetch_factor=valid_prefetch,
             worker_cpu_threads=worker_cpu_threads,
+            include_entity_id=False,
+            data_format=data_format,
+            processed_root=processed_root,
+            vectorized_root=vectorized_root,
         )
 
         self.model = build_model(cfg).to(self.device)
@@ -536,7 +548,7 @@ class Trainer:
                         extra=eval_extra,
                     )
                     # Best selector already logged detailed info, so keep this simple
-                    self.logger.info(f"✓ Saved best checkpoint at step {g_step}")
+                    self.logger.info(f"[OK] Saved best checkpoint at step {g_step}")
 
             # Resolve gradient diagnostics parameters
             grad_diag_every = runtime.get("grad_diag_every")  # None means use log_every

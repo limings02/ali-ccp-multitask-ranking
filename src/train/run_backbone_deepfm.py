@@ -60,8 +60,11 @@ def main() -> None:
         feature_meta=feature_meta,
         debug=bool(_get_cfg(data_cfg, "debug", False)),
         neg_keep_prob_train=float(_get_cfg(data_cfg, "neg_keep_prob_train", 1.0)),
-        prefetch_factor=(int(data_cfg["prefetch_factor"]) if "prefetch_factor" in data_cfg else None),
+        prefetch_factor=(int(data_cfg["prefetch_factor"]) if "prefetch_factor" in data_cfg else 4),
         worker_cpu_threads=int(_get_cfg(data_cfg, "worker_cpu_threads", 1)),
+        data_format=str(_get_cfg(data_cfg, "format", "vectorized")),
+        processed_root=str(_get_cfg(data_cfg, "processed_dir", "data/processed")),
+        vectorized_root=str(_get_cfg(data_cfg, "vectorized_dir", "data/vectorized")),
     )
 
     model = DeepFMBackbone(

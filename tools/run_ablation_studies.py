@@ -41,9 +41,14 @@ EXPERIMENTS = [
         "description": "mychange_mmoe"
     },
     {
-        "name": "classic_homo_ple",
+        "name": "wideopen_mmoe",
         "config": "configs\\experiments\\mmoe_optim\\test3_wideopen_mmoe.yaml",
         "description": "wide open mmoe"
+    },
+    {
+        "name": "residual_mmoe",
+        "config": "configs\\experiments\\mmoe_optim\\test4_residual_mmoe.yaml",
+        "description": "residual mmoe"
     },
 ]
 
@@ -95,14 +100,14 @@ def run_experiment(config_path: str, exp_name: str, exp_desc: str) -> bool:
         )
         
         if result.returncode == 0:
-            logger.info(f"✓ 实验 {exp_name} 运行成功")
+            logger.info(f"[OK] 实验 {exp_name} 运行成功")
             return True
         else:
-            logger.error(f"✗ 实验 {exp_name} 运行失败 (返回码: {result.returncode})")
+            logger.error(f"[FAIL] 实验 {exp_name} 运行失败 (返回码: {result.returncode})")
             return False
             
     except Exception as e:
-        logger.error(f"✗ 实验 {exp_name} 执行异常: {e}")
+        logger.error(f"[FAIL] 实验 {exp_name} 执行异常: {e}")
         return False
 
 
@@ -135,7 +140,7 @@ def main():
     failed = len(results) - passed
     
     for exp_name, success in results.items():
-        status = "✓ 成功" if success else "✗ 失败"
+        status = "[OK] 成功" if success else "[FAIL] 失败"
         logger.info(f"{status}: {exp_name}")
     
     logger.info(f"\n总计: {passed} 个成功，{failed} 个失败")

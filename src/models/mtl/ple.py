@@ -269,19 +269,9 @@ class PLE(nn.Module):
 
         self.in_dim = in_dim
         self.layernorm = nn.LayerNorm(in_dim)
-
-        # ==========================================================================
-        # 异构专家支持：检测是否启用新的异构专家逻辑
-        # ==========================================================================
-        self._use_hetero_experts = _should_use_hetero_experts(ple_cfg)
-        
-        if self._use_hetero_experts:
-            # ==================== 新路径：异构专家 ====================
-            _validate_hetero_config(ple_cfg, tasks)
-            self._build_hetero_experts(ple_cfg, tasks, in_dim)
-        else:
-            # ==================== 旧路径：同构专家（完全保持原逻辑）====================
-            self._build_homogeneous_experts(ple_cfg, tasks, in_dim)
+        # Ensure health-diagnostic attributes exist for all expert build paths.
+        self._expert_output_aligner = None
+        self._expert_names: Dict[str, List[str]] = {}
 
         # ========== Gate 稳定化配置（与 mmoe.py 完全对齐）==========
         gate_stabilize_cfg = ple_cfg.get("gate_stabilize", {}) or {}
@@ -313,6 +303,28 @@ class PLE(nn.Module):
         # 用于外部设置当前 step（由 trainer 在每个 step 更新）
         self._current_step: int = 0
         self._total_steps: int = 1  # 防止除零
+
+        # ==========================================================================
+        # 异构专家支持：检测是否启用新的异构专家逻辑
+        # ==========================================================================
+        self._use_hetero_experts = _should_use_hetero_experts(ple_cfg)
+        
+        if self._use_hetero_experts:
+            # ==================== 新路径：异构专家 ====================
+            _validate_hetero_config(ple_cfg, tasks)
+            self._build_hetero_experts(ple_cfg, tasks, in_dim)
+        else:
+            # ==================== 旧路径：同构专家（完全保持原逻辑）====================
+            self._build_homogeneous_experts(ple_cfg, tasks, in_dim)
+        
+        # Final task representation dim can differ from base input dim in
+        # hetero experts or multi-layer homogeneous experts.
+        if self._use_hetero_experts:
+            self.task_repr_dim = int(getattr(self, "_expert_out_dim", in_dim))
+        elif getattr(self, "num_ple_layers", 1) > 1 and hasattr(self, "expert_layers"):
+            self.task_repr_dim = int(self.expert_layers[-1].out_dim)
+        else:
+            self.task_repr_dim = in_dim
 
         # ========== 新增：gate_reg_scope 配置（改动 D）==========
         # "shared_only"：只对 shared experts 的 gate 权重做正则（默认）
@@ -398,7 +410,7 @@ class PLE(nn.Module):
             }
 
             self.towers[task] = TaskHead(
-                in_dim=in_dim,
+                in_dim=self.task_repr_dim,
                 mlp_dims=mlp_dims,
                 out=1,
                 activation=activation,
@@ -419,7 +431,7 @@ class PLE(nn.Module):
         # 输入为 CVR 分支的 PLE 混合表征（进入 CVR tower 前）
         # ============================================================
         self._residual_cfg = esmm_residual_cfg or {}
-        self.residual_head = build_residual_head(in_dim, self._residual_cfg)
+        self.residual_head = build_residual_head(self.task_repr_dim, self._residual_cfg)
         self._residual_stop_grad_input = bool(self._residual_cfg.get("stop_grad_input", False))
 
     # =========================================================================
@@ -672,7 +684,7 @@ class PLE(nn.Module):
           - gates: ModuleDict[task] -> Gate
           - num_shared: int
           - num_private: Dict[task, int]
-          - out_dim: int (输出维度，等于in_dim)
+          - out_dim: int (输出维度，等于该层 expert 的输出维度)
           - layer_idx: int
         """
         in_dim = int(layer_cfg["in_dim"])
@@ -682,6 +694,7 @@ class PLE(nn.Module):
         expert_dropout = float(layer_cfg["expert_dropout"])
         expert_activation = str(layer_cfg["expert_activation"])
         expert_use_bn = bool(layer_cfg["expert_use_bn"])
+        out_dim = int(expert_mlp_dims[-1]) if expert_mlp_dims else in_dim
         
         # 构建该层的Module
         class PLELayerModule(nn.Module):
@@ -689,7 +702,7 @@ class PLE(nn.Module):
                 super().__init__()
                 self.num_shared = num_shared
                 self.num_private = num_private
-                self.out_dim = in_dim
+                self.out_dim = out_dim
                 self.layer_idx = layer_idx
         
         layer_module = PLELayerModule()

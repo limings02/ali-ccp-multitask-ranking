@@ -1,0 +1,277 @@
+# ============================================================================
+# CTR Bypass 收益验证 - Baseline（有 CTR bypass）
+# ============================================================================
+# 实验定位：DeepFM + MMoE + ESMM(v2) - 验证 CTR 是否需要 wide/FM bypass
+# 对照组：无 CTR bypass（需创建新文件 no_ctr_bypass_mmoe.yaml）
+# 
+# 关键变量（Option 1 实验设计）：
+#   - model.backbone.per_head_add.ctr: { use_wide: true, use_fm: true }  ✅ CTR bypass
+#   - model.backbone.per_head_add.cvr: { use_wide: false, use_fm: false }
+#   - 其他参数完全对齐 base_mmoe（单变量验证）
+#
+# 对齐清单（vs base_mmoe）：
+#   1. deep_hidden_dims: [128, 64]  （原 [64, 64]）
+#   2. deep_dropout: 0.2            （原 0.1）
+#   3. expert_mlp_dims: [128]       （原 [128, 64]）
+#   4. gate_type: "linear"          （原 "mlp"）
+#   5. ESMM lambda_ctr: 1.0         （原 0.7）
+#   6. ESMM lambda_ctcvr: 5         （原 8）
+#   7. batch_size: 1024             （原 2048）
+# ============================================================================
+
+experiment:
+  name: "test4_residual_mmoe"
+
+# ESMM toggle
+use_esmm: true
+esmm:
+  version: "v2"
+  eps: 1.0e-8
+  lambda_ctr: 1.0
+  lambda_ctcvr: 5
+  lambda_cvr_aux: 0.3
+
+  residual:
+    enabled: true                   # 开启 residual 修正
+    input: "mmoe_cvr"               # 输入来源: CVR 分支的 MMoE/PLE 输出
+    stop_grad_input: true          # false: 允许 ctcvr loss 更新 shared/moe 表征
+                                    # true: 阻断梯度，仅更新 residual head
+    mlp_dims: [64]                  # MLP 隐藏层维度, 可用 [128, 64] 加深
+    dropout: 0.1                    # MLP dropout
+    use_layernorm: true             # 输入侧 LayerNorm（推荐 true）
+    alpha: 1.0                      # tanh 限幅系数, r_logit ∈ [-alpha, +alpha]
+
+    # 显式 L2 正则: L_res_reg = mean(r_logit^2) * res_reg_weight
+    # 鼓励残差保持小幅修正，避免 residual 替代 ESMM 乘法
+    res_reg_weight: 5.0e-4
+
+    # Anchor loss（可选，默认关闭）
+    # 让 residual 修正后的 ctcvr_logit 不要偏离乘法版本太远
+    anchor:
+      enabled: false
+      weight: 0.02                  # MSE(ctcvr_logit, logit_mul) 的权重
+      eps: 1.0e-6
+
+# ============================================================================
+# Data Config
+# ============================================================================
+data:
+  metadata_path: "data/processed/metadata.json"
+  batch_size: 2048
+  num_workers: 0
+  num_workers_valid: 0
+  prefetch_factor: 1
+  pin_memory: true
+  persistent_workers: false
+  drop_last: false
+  debug: false
+  seed: 20260127                      # 公共锁定
+  neg_keep_prob_train: 1.0           # 不使用 negative sampling
+  
+sampling:
+  negative_sampling: "none"      # inbatch 批内负采样， uniform 均匀负采样     
+  
+
+# ============================================================================
+# Embedding Config（公共锁定）
+# ============================================================================
+embedding:
+  default_embedding_dim: 8            # 公共锁定
+  embedding_dim_overrides: {}
+  mode: "sum"
+  sparse_grad: true                   # 公共锁定
+
+# ============================================================================
+# Model Config
+# ============================================================================
+model:
+  name: "test1_mmoe"
+  mtl: "mmoe"                         # 继承 E3：MMoE
+  enabled_heads: ["ctr", "cvr"]       # 双任务
+  tasks: ["ctr", "cvr"]               # 双任务
+  
+  # Backbone 配置
+  backbone:
+    use_legacy_pseudo_deepfm: false
+    return_logit_parts: true
+    per_head_add:
+      ctr: { use_wide: false, use_fm: false }     # 
+      cvr: { use_wide: false, use_fm: false }
+    deep_hidden_dims: [128, 64]
+    deep_dropout: 0.2
+    deep_activation: relu
+    deep_use_bn: false
+    fm_enabled: false
+    fm_projection_dim: 16
+    out_dim: 64
+  
+  # MMoE 配置
+  mmoe:
+    num_experts: 4
+    expert_mlp_dims: [128]
+    gate_type: "linear"
+    gate_hidden_dims: [32]
+    input: "deep_h"
+    # add_fm_vec: false
+    # add_emb: "none"
+    # part_proj_dim: null
+    # fusion: "concat"
+    # adapter_mlp_dims:
+    # norm: "layernorm"
+
+    dropout: 0.0
+    log_gates: true
+    gate_stabilize:
+      enabled: true
+      eps: 1.0e-8
+      entropy_reg_weight: 3.0e-4
+      load_balance_kl_weight: 3.0e-4
+      log_stats: true
+      schedule:
+        enabled: true
+        warm_frac: 0.2
+        temperature_start: 1.2
+        temperature_end: 1.0
+        noise_std_start: 0.03
+        noise_std_end: 0.01
+  
+  # Head 配置
+  heads:
+    default:
+      mlp_dims: [128]
+      dropout: 0.1
+      use_bn: false
+      activation: "relu"
+    ctr: {}
+    cvr: {}
+  
+# ============================================================================
+# Optimizer Config
+# ============================================================================
+optim:
+  type: dual_sparse_dense
+  dense:
+    lr: 0.0006
+    weight_decay: 1e-5
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+  sparse:
+    enabled: true
+    lr: 0.001
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    allow_fallback_if_empty: false
+  lr_scheduler:
+    enabled: true
+    target: "both"
+    type: "cosine"
+    warmup_steps: 4000
+    total_steps: 40000
+    min_lr_ratio: 0.1
+
+# ============================================================================
+# Loss Config
+# ============================================================================
+loss:
+  w_ctr: 1.0
+  w_cvr: 1.0
+  eps: 1.0e-6
+  pos_weight_dynamic: false
+  static_pos_weight:
+    ctr: 1
+    ctcvr: 1
+  neg_sample_weight_correction: false  # 启用负采样权重补偿
+  pos_weight_clip:
+    ctr: 10
+    ctcvr: 20
+  pos_weight_clip_schedule:
+    enabled: false
+    target: "ctcvr"
+    type: "piecewise"
+    milestones: [0, 8000]
+    values: [300, 30]
+  aux_focal:
+    enabled: false
+    warmup_steps: 8000
+    target_head: "ctcvr"
+    lambda: 0.05
+    gamma: 1.0
+    use_alpha: false
+    alpha: 0.25
+    detach_p_for_weight: true
+    compute_fp32: true
+    log_components: true
+
+# ============================================================================
+# Runtime Config
+# ============================================================================
+runtime:
+  device: "cuda"
+  epochs: 2
+  log_every: 3000
+  amp: true
+  grad_diag_enabled: true
+  grad_samples_target: 200
+  grad_diag_every: 1000
+  grad_diag_min_tasks: 2
+  log_health_metrics: true
+  max_train_steps: 40000
+  max_valid_steps: null
+  grad_clip_norm: 2.0
+  seed: 20260127                      # 公共锁定
+  resume_path: null
+  auto_eval: true
+  auto_eval_split: "valid"
+  auto_eval_save_preds: true
+  auto_eval_ckpt: "best"
+  save_last: false
+  
+  # BestSelector 配置（ESMM 模式：primary=ctcvr, aux=ctr/cvr）
+  best_selection:
+    strategy: "gate"
+    primary_key: "auc_ctcvr"          # 继承 E3：ESMM 模式下关注 CTCVR
+    aux_keys: ["auc_ctr", "auc_cvr"]
+    use_primary_ma: false
+    ma_window: 5
+    tol_primary: 0.0001
+    tol_aux:
+      auc_ctr: 0.003
+      auc_cvr: 0.008
+    confirm_times: 1
+    cooldown_evals: 0
+    log_decision: true
+
+  # 专家健康诊断配置
+  expert_health_diag:
+    enabled: true
+    log_interval: 1000
+    log_on_valid: true
+    utilization:
+      enabled: true
+      dead_mean_threshold: 0.01
+      dead_p95_threshold: 0.01
+      dead_require_p95: false
+      rank_dom_top1_threshold: 0.95
+      rank_dom_uniform_eps: 0.03
+      rank_dom_std_eps: 0.02
+      monopoly_top1_threshold: 0.95
+      monopoly_mean_threshold: null
+      compute_gini: true
+    output_stats:
+      enabled: true
+      per_expert_stats: true
+      cross_expert_similarity: true
+      similarity_alert_threshold: 0.95
+    gradient:
+      enabled: true
+      per_expert_grad_norm: true
+      vanish_threshold: 1.0e-6
+      explode_threshold: 100.0
+    type_specialization:
+      enabled: true
+      aggregate_by_type: true
+      cross_task_specialization: true
+    aligner:
+      enabled: true
+      log_scale_stats: true
+      log_distribution_change: false

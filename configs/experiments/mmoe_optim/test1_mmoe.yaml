@@ -58,16 +58,16 @@ esmm:
 data:
   metadata_path: "data/processed/metadata.json"
   batch_size: 2048
-  num_workers: 4
-  num_workers_valid: 2
-  prefetch_factor: 2
+  num_workers: 0
+  num_workers_valid: 0
+  prefetch_factor: 1
   pin_memory: true
   persistent_workers: false
   drop_last: false
   debug: false
   seed: 20260127                      # 公共锁定
   neg_keep_prob_train: 1.0           # 不使用 negative sampling
-
+  
 sampling:
   negative_sampling: "none"      # inbatch 批内负采样， uniform 均匀负采样     
   

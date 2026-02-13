@@ -1,5 +1,5 @@
 """
-EmbeddingBag-friendly DataLoader utilities for processed parquet data.
+EmbeddingBag-friendly DataLoader utilities for parquet and vectorized data.
 
 Design goals
 ------------
@@ -20,14 +20,14 @@ import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import logging
 from functools import partial
 
 import numpy as np
 import torch
 from torch.autograd.profiler import record_function
-from torch.utils.data import DataLoader, IterableDataset, get_worker_info
+from torch.utils.data import DataLoader, Dataset, IterableDataset, Subset, get_worker_info
 
 # Prefer importing the dataset class; provide a clear error if name changes.
 try:
@@ -37,6 +37,12 @@ except Exception as exc:  # pragma: no cover - defensive
         "Failed to import ProcessedIterDataset from src.data.dataset. "
         "Please ensure dataset.py exposes ProcessedIterDataset."
     ) from exc
+
+try:
+    from src.data.vectorized_dataset import VectorizedBatchCollator, VectorizedRecDataset
+except Exception:  # pragma: no cover - optional in legacy setups
+    VectorizedBatchCollator = None
+    VectorizedRecDataset = None
 
 
 # ---------- small helpers ----------
@@ -159,10 +165,17 @@ class EmbeddingBagBatchCollator:
     Supports enable_data_cursor to record batch position for resume.
     """
 
-    def __init__(self, feature_meta: Dict[str, Any], debug: bool = False, enable_data_cursor: bool = False) -> None:
+    def __init__(
+        self,
+        feature_meta: Dict[str, Any],
+        debug: bool = False,
+        enable_data_cursor: bool = False,
+        include_entity_id: bool = True,
+    ) -> None:
         self.feature_meta = feature_meta
         self.debug = debug
         self.enable_data_cursor = enable_data_cursor
+        self.include_entity_id = bool(include_entity_id)
         self._field_plans: List[_FieldPlan] | None = None
         self._field_names: List[str] | None = None
         self._any_use_value: bool = False
@@ -248,7 +261,8 @@ class EmbeddingBagBatchCollator:
                     cm = 1.0 if y_ctr[i] > 0.0 else 0.0
                 click_mask[i] = float(cm)
                 row_id[i] = int(row.get("row_id", i))
-                entity_id.append(row.get("entity_id"))
+                if self.include_entity_id:
+                    entity_id.append(row.get("entity_id"))
 
             y_ctcvr = np.logical_and(y_ctr > 0.5, y_cvr > 0.5).astype(np.float32, copy=False)
             labels = {
@@ -258,7 +272,9 @@ class EmbeddingBagBatchCollator:
                 "click_mask": torch.from_numpy(click_mask),
                 "row_id": torch.from_numpy(row_id),
             }
-            meta_out = {"entity_id": entity_id}
+            meta_out: Dict[str, Any] = {}
+            if self.include_entity_id:
+                meta_out["entity_id"] = entity_id
 
             # 2) per-field packing
             fields_out: Dict[str, Dict[str, torch.Tensor | None]] = {}
@@ -435,6 +451,33 @@ class _SubsetIterDataset(IterableDataset):
         return base_len
 
 
+def _subset_map_dataset(
+    base_ds: Dataset,
+    subset_ratio: float | None,
+    max_samples: int | None,
+    seed: int | None,
+) -> Dataset:
+    if subset_ratio is None and max_samples is None:
+        return base_ds
+    total = len(base_ds)
+    if total <= 0:
+        return base_ds
+
+    take = total
+    if subset_ratio is not None:
+        if subset_ratio <= 0.0 or subset_ratio > 1.0:
+            raise ValueError("subset_ratio must be in (0,1].")
+        take = min(take, max(1, int(total * subset_ratio)))
+    if max_samples is not None:
+        if max_samples <= 0:
+            raise ValueError("subset_max_samples must be positive.")
+        take = min(take, int(max_samples))
+
+    rng = np.random.default_rng(seed if seed is not None else 2026)
+    indices = rng.choice(total, size=take, replace=False).tolist()
+    return Subset(base_ds, indices)
+
+
 def make_dataloader(
     split: str,
     batch_size: int,
@@ -454,6 +497,10 @@ def make_dataloader(
     worker_cpu_threads: int = 1,
     resume_state: Optional[Dict] = None,
     enable_data_cursor: bool = False,
+    include_entity_id: bool = True,
+    data_format: str = "vectorized",
+    processed_root: str | Path = "data/processed",
+    vectorized_root: str | Path = "data/vectorized",
 ) -> DataLoader:
     """
     Build a DataLoader that yields (labels, features, meta) tuples
@@ -467,36 +514,9 @@ def make_dataloader(
         raise ValueError("split must be 'train' or 'valid'")
     if worker_cpu_threads <= 0:
         raise ValueError("worker_cpu_threads must be >= 1")
-
-    data_dir = Path("data/processed") / split
-    metadata_path = data_dir.parent / "metadata.json"
-    fm = feature_meta or _load_feature_meta(metadata_path)
-
-    # IterableDataset does not support shuffle=True; guard against misuse.
-    if shuffle is None:
-        shuffle = split == "train"
-    if shuffle:
-        raise ValueError("shuffle=True is not supported with IterableDataset; shuffle offline instead.")
-
-    # ===== Restore DatasetResumeState if provided =====
-    from src.data.dataset import DatasetResumeState
-    resume_state_obj = None
-    if resume_state is not None:
-        resume_state_obj = DatasetResumeState.from_dict(resume_state)
-
-    ds: IterableDataset = ProcessedIterDataset(
-        data_dir,
-        metadata_path=metadata_path,
-        neg_keep_prob=neg_keep_prob_train if split == "train" else 1.0,
-        resume_state=resume_state_obj,
-    )
-    if split == "valid" and (subset_ratio is not None or subset_max_samples is not None):
-        ds = _SubsetIterDataset(
-            ds,
-            subset_ratio=subset_ratio,
-            max_samples=subset_max_samples,
-            seed=subset_seed if subset_seed is not None else seed,
-        )
+    fmt = str(data_format).lower()
+    if fmt not in {"parquet", "vectorized"}:
+        raise ValueError("data_format must be one of {'parquet','vectorized'}")
 
     base_seed = seed if seed is not None else None
     worker_init = (
@@ -504,44 +524,112 @@ def make_dataloader(
         if num_workers > 0
         else None
     )
-    
-    # ===== Use enable_data_cursor parameter =====
-    collator = EmbeddingBagBatchCollator(feature_meta=fm, debug=debug, enable_data_cursor=enable_data_cursor)
-    collate = partial(_collate_embeddingbag, collator=collator)
 
     # Determine prefetch_factor: for high worker counts, prefetch 4 is usually better.
-    if prefetch_factor is not None:
+    if num_workers <= 0:
+        effective_prefetch = None
+    elif prefetch_factor is not None:
         effective_prefetch = prefetch_factor
     else:
-        if num_workers <= 0:
-            effective_prefetch = None
-        elif num_workers >= 4:
-            effective_prefetch = 4
-        else:
-            effective_prefetch = 2
-    
-    dl = DataLoader(
-        ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        drop_last=drop_last,
-        pin_memory=pin_memory,
-        persistent_workers=bool(persistent_workers and num_workers > 0),
-        collate_fn=collate,
-        worker_init_fn=worker_init,
-        prefetch_factor=effective_prefetch,
-    )
+        effective_prefetch = 4
+
+    if fmt == "parquet":
+        data_dir = Path(processed_root) / split
+        metadata_path = data_dir.parent / "metadata.json"
+        fm = feature_meta or _load_feature_meta(metadata_path)
+
+        # IterableDataset does not support shuffle=True; guard against misuse.
+        if shuffle is None:
+            shuffle = split == "train"
+        if shuffle:
+            raise ValueError(
+                "shuffle=True is not supported with IterableDataset; shuffle offline instead."
+            )
+
+        # ===== Restore DatasetResumeState if provided =====
+        from src.data.dataset import DatasetResumeState
+
+        resume_state_obj = None
+        if resume_state is not None:
+            resume_state_obj = DatasetResumeState.from_dict(resume_state)
+
+        ds_obj: IterableDataset = ProcessedIterDataset(
+            data_dir,
+            metadata_path=metadata_path,
+            neg_keep_prob=neg_keep_prob_train if split == "train" else 1.0,
+            resume_state=resume_state_obj,
+        )
+        if split == "valid" and (subset_ratio is not None or subset_max_samples is not None):
+            ds_obj = _SubsetIterDataset(
+                ds_obj,
+                subset_ratio=subset_ratio,
+                max_samples=subset_max_samples,
+                seed=subset_seed if subset_seed is not None else seed,
+            )
+
+        collator = EmbeddingBagBatchCollator(
+            feature_meta=fm,
+            debug=debug,
+            enable_data_cursor=enable_data_cursor,
+            include_entity_id=include_entity_id,
+        )
+        collate = partial(_collate_embeddingbag, collator=collator)
+        dl = DataLoader(
+            ds_obj,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            drop_last=drop_last,
+            pin_memory=pin_memory,
+            persistent_workers=bool(persistent_workers and num_workers > 0),
+            collate_fn=collate,
+            worker_init_fn=worker_init,
+            prefetch_factor=effective_prefetch,
+        )
+    else:
+        if VectorizedRecDataset is None or VectorizedBatchCollator is None:
+            raise ImportError(
+                "Vectorized data format requested, but vectorized dataset modules are unavailable."
+            )
+        split_dir = Path(vectorized_root) / split
+        ds_map: Dataset = VectorizedRecDataset(split_dir)
+        if split == "valid":
+            ds_map = _subset_map_dataset(
+                ds_map,
+                subset_ratio=subset_ratio,
+                max_samples=subset_max_samples,
+                seed=subset_seed if subset_seed is not None else seed,
+            )
+        if shuffle is None:
+            shuffle = split == "train"
+        collate = VectorizedBatchCollator(split_dir, include_entity_id=include_entity_id)
+        dl = DataLoader(
+            ds_map,
+            batch_size=batch_size,
+            shuffle=bool(shuffle),
+            num_workers=num_workers,
+            drop_last=drop_last,
+            pin_memory=pin_memory,
+            persistent_workers=bool(persistent_workers and num_workers > 0),
+            collate_fn=collate,
+            worker_init_fn=worker_init,
+            prefetch_factor=effective_prefetch,
+        )
+
     if num_workers > 0:
         logging.getLogger(__name__).info(
-            "DataLoader spawn config: num_workers=%d persistent_workers=%s pin_memory=%s prefetch_factor=%s worker_cpu_threads=%d collate_fn=%s.%s",
+            "DataLoader spawn config: format=%s num_workers=%d persistent_workers=%s pin_memory=%s prefetch_factor=%s worker_cpu_threads=%d collate_fn=%s",
+            fmt,
             num_workers,
             bool(persistent_workers and num_workers > 0),
             pin_memory,
             effective_prefetch,
             worker_cpu_threads,
-            collate.func.__module__ if isinstance(collate, partial) else type(collate).__module__,
-            collate.func.__name__ if isinstance(collate, partial) else getattr(collate, "__name__", type(collate).__name__),
+            (
+                f"{collate.func.__module__}.{collate.func.__name__}"
+                if isinstance(collate, partial)
+                else f"{type(collate).__module__}.{type(collate).__name__}"
+            ),
         )
     return dl
 

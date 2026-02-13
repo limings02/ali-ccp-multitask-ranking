@@ -101,13 +101,6 @@ class GradConflictSampler:
     # Track whether task2 ever had a valid gradient (for diagnostics)
     _task2_has_grad_count: int = field(default=0, init=False, repr=False)
 
-    def __post_init__(self) -> None:
-        if self.grad_samples_target < 500:
-            logger.warning(
-                "grad_samples_target=%d is below minimum 500, clamping to 500",
-                self.grad_samples_target,
-            )
-            self.grad_samples_target = 500
 
     # ------------------------------------------------------------------
     # Lifecycle

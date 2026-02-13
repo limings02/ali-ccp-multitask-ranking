@@ -54,10 +54,9 @@ data:
   # metadata 中包含 feature_meta / rows / total_num_embeddings
   metadata_path: "data/processed/metadata.json"
   batch_size: 2048
-  num_workers: 4
-  # valid 独立 worker 配置，避免与 train 同配导致内存压力
-  num_workers_valid: 2
-  prefetch_factor: 2
+  num_workers: 0
+  num_workers_valid: 0
+  prefetch_factor: 1
   pin_memory: true
   persistent_workers: false
   drop_last: false
@@ -261,6 +260,7 @@ runtime:
   amp: true
   # 梯度冲突诊断（GradConflictSampler + GradientDiagnostics）
   grad_diag_enabled: true
+  grad_samples_target: 200
   # null 则回退到 log_every
   grad_diag_every: 1000
   # 至少需要多少任务才做梯度冲突统计

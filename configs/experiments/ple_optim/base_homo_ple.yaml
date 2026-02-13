@@ -32,9 +32,11 @@ esmm:
 data:
   metadata_path: data/processed/metadata.json
   batch_size: 2048
-  num_workers: 4
-  num_workers_valid: 2
-  prefetch_factor: 2
+  # Windows-safe loader settings:
+  # avoid multiprocessing shared-file-mapping exhaustion (Win error 1450/1455).
+  num_workers: 0
+  num_workers_valid: 0
+  prefetch_factor: 1
   pin_memory: true
   persistent_workers: false
   drop_last: false
@@ -276,7 +278,8 @@ runtime:
   log_every: 3000
   amp: true
   grad_diag_enabled: true
-  grad_diag_every: 1000
+  grad_samples_target: 200
+  # grad_diag_every: 1000
   grad_diag_min_tasks: 2
   log_health_metrics: true
   max_train_steps: 40000

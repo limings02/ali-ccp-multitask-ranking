@@ -6,6 +6,7 @@ Shared evaluation entry point for CLI and Trainer auto-eval.
 
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -84,9 +85,13 @@ def _resolve_run_dir(run_dir: Optional[str | Path], ckpt_path: Optional[str | Pa
 def _build_dataloader(cfg: Dict[str, Any], split: str, feature_meta: Dict[str, Any]):
     data_cfg = cfg.get("data", {})
     # Use num_workers_valid for eval to avoid multiprocessing issues
-    num_workers = int(data_cfg.get("num_workers_valid", data_cfg.get("num_workers", 0)))
+    default_workers = max(0, min(6, os.cpu_count() or 1))
+    num_workers = int(data_cfg.get("num_workers_valid", data_cfg.get("num_workers", default_workers)))
     # Only set prefetch_factor if num_workers > 0 (required by PyTorch DataLoader)
-    prefetch = int(data_cfg.get("prefetch_factor", 2)) if num_workers > 0 else None
+    prefetch = int(data_cfg.get("prefetch_factor", 4)) if num_workers > 0 else None
+    data_format = str(data_cfg.get("format", "vectorized")).lower()
+    processed_root = str(data_cfg.get("processed_dir", "data/processed"))
+    vectorized_root = str(data_cfg.get("vectorized_dir", "data/vectorized"))
     return make_dataloader(
         split=split,
         batch_size=int(data_cfg.get("batch_size", 256)),
@@ -99,6 +104,9 @@ def _build_dataloader(cfg: Dict[str, Any], split: str, feature_meta: Dict[str, A
         feature_meta=feature_meta,
         debug=bool(data_cfg.get("debug", False)),
         prefetch_factor=prefetch,
+        data_format=data_format,
+        processed_root=processed_root,
+        vectorized_root=vectorized_root,
     )
 
 

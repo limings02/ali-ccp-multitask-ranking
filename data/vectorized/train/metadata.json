@@ -1,0 +1,339 @@
+{
+  "format": "vectorized_ragged_csr_v1",
+  "split": "train",
+  "data_version": "vectorized_v1",
+  "vocab_version": "dead7dc81da46157468e7a7beb19992fc798cb63e5402f21bf159a8e1b2b33d1",
+  "hash_version": "dead7dc81da46157468e7a7beb19992fc798cb63e5402f21bf159a8e1b2b33d1",
+  "num_rows": 40179176,
+  "field_names": [
+    "f0_205",
+    "f0_206",
+    "f0_207",
+    "f0_210",
+    "f0_216",
+    "f0_301",
+    "f0_508",
+    "f0_509",
+    "f0_702",
+    "f0_853",
+    "f1_101",
+    "f1_109_14",
+    "f1_110_14",
+    "f1_121",
+    "f1_122",
+    "f1_124",
+    "f1_125",
+    "f1_126",
+    "f1_127_14",
+    "f1_127",
+    "f1_128",
+    "f1_129",
+    "f1_150_14"
+  ],
+  "offsets_definition": {
+    "stored": "[N+1]",
+    "training_collate": "[B] for include_last_offset=False",
+    "note": "offsets[i] is bag start; offsets[N] equals total nnz"
+  },
+  "labels": {
+    "y_ctr": {
+      "file": "y_ctr.npy",
+      "shape": [
+        40179176
+      ],
+      "dtype": "float32"
+    },
+    "y_cvr": {
+      "file": "y_cvr.npy",
+      "shape": [
+        40179176
+      ],
+      "dtype": "float32"
+    },
+    "y_ctcvr": {
+      "file": "y_ctcvr.npy",
+      "shape": [
+        40179176
+      ],
+      "dtype": "float32"
+    },
+    "click_mask": {
+      "file": "click_mask.npy",
+      "shape": [
+        40179176
+      ],
+      "dtype": "float32"
+    },
+    "row_id": {
+      "file": "row_id.npy",
+      "shape": [
+        40179176
+      ],
+      "dtype": "int64"
+    },
+    "entity_id": {
+      "data_file": "entity_id_data.bin",
+      "offsets_file": "entity_id_offsets.npy",
+      "offsets_shape": [
+        40179177
+      ],
+      "encoding": "json-utf8-bytes"
+    }
+  },
+  "fields": {
+    "f0_205": {
+      "is_multi_hot": false,
+      "use_value": false,
+      "nnz_total": 40179176,
+      "indices_file": "f__f0_205__indices.npy",
+      "offsets_file": "f__f0_205__offsets.npy",
+      "weights_file": null,
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": null
+    },
+    "f0_206": {
+      "is_multi_hot": false,
+      "use_value": false,
+      "nnz_total": 40179176,
+      "indices_file": "f__f0_206__indices.npy",
+      "offsets_file": "f__f0_206__offsets.npy",
+      "weights_file": null,
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": null
+    },
+    "f0_207": {
+      "is_multi_hot": false,
+      "use_value": false,
+      "nnz_total": 40179176,
+      "indices_file": "f__f0_207__indices.npy",
+      "offsets_file": "f__f0_207__offsets.npy",
+      "weights_file": null,
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": null
+    },
+    "f0_210": {
+      "is_multi_hot": true,
+      "use_value": false,
+      "nnz_total": 244992358,
+      "indices_file": "f__f0_210__indices.npy",
+      "offsets_file": "f__f0_210__offsets.npy",
+      "weights_file": null,
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": null
+    },
+    "f0_216": {
+      "is_multi_hot": false,
+      "use_value": false,
+      "nnz_total": 40179176,
+      "indices_file": "f__f0_216__indices.npy",
+      "offsets_file": "f__f0_216__offsets.npy",
+      "weights_file": null,
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": null
+    },
+    "f0_301": {
+      "is_multi_hot": false,
+      "use_value": false,
+      "nnz_total": 40179176,
+      "indices_file": "f__f0_301__indices.npy",
+      "offsets_file": "f__f0_301__offsets.npy",
+      "weights_file": null,
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": null
+    },
+    "f0_508": {
+      "is_multi_hot": false,
+      "use_value": true,
+      "nnz_total": 40179176,
+      "indices_file": "f__f0_508__indices.npy",
+      "offsets_file": "f__f0_508__offsets.npy",
+      "weights_file": "f__f0_508__weights.npy",
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": "float32"
+    },
+    "f0_509": {
+      "is_multi_hot": false,
+      "use_value": true,
+      "nnz_total": 40179176,
+      "indices_file": "f__f0_509__indices.npy",
+      "offsets_file": "f__f0_509__offsets.npy",
+      "weights_file": "f__f0_509__weights.npy",
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": "float32"
+    },
+    "f0_702": {
+      "is_multi_hot": false,
+      "use_value": true,
+      "nnz_total": 40179176,
+      "indices_file": "f__f0_702__indices.npy",
+      "offsets_file": "f__f0_702__offsets.npy",
+      "weights_file": "f__f0_702__weights.npy",
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": "float32"
+    },
+    "f0_853": {
+      "is_multi_hot": true,
+      "use_value": true,
+      "nnz_total": 79851923,
+      "indices_file": "f__f0_853__indices.npy",
+      "offsets_file": "f__f0_853__offsets.npy",
+      "weights_file": "f__f0_853__weights.npy",
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": "float32"
+    },
+    "f1_101": {
+      "is_multi_hot": false,
+      "use_value": false,
+      "nnz_total": 40179176,
+      "indices_file": "f__f1_101__indices.npy",
+      "offsets_file": "f__f1_101__offsets.npy",
+      "weights_file": null,
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": null
+    },
+    "f1_109_14": {
+      "is_multi_hot": true,
+      "use_value": true,
+      "nnz_total": 2175036722,
+      "indices_file": "f__f1_109_14__indices.npy",
+      "offsets_file": "f__f1_109_14__offsets.npy",
+      "weights_file": "f__f1_109_14__weights.npy",
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": "float32"
+    },
+    "f1_110_14": {
+      "is_multi_hot": true,
+      "use_value": true,
+      "nnz_total": 2233779684,
+      "indices_file": "f__f1_110_14__indices.npy",
+      "offsets_file": "f__f1_110_14__offsets.npy",
+      "weights_file": "f__f1_110_14__weights.npy",
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": "float32"
+    },
+    "f1_121": {
+      "is_multi_hot": false,
+      "use_value": false,
+      "nnz_total": 40179176,
+      "indices_file": "f__f1_121__indices.npy",
+      "offsets_file": "f__f1_121__offsets.npy",
+      "weights_file": null,
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": null
+    },
+    "f1_122": {
+      "is_multi_hot": false,
+      "use_value": false,
+      "nnz_total": 40179176,
+      "indices_file": "f__f1_122__indices.npy",
+      "offsets_file": "f__f1_122__offsets.npy",
+      "weights_file": null,
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": null
+    },
+    "f1_124": {
+      "is_multi_hot": false,
+      "use_value": false,
+      "nnz_total": 40179176,
+      "indices_file": "f__f1_124__indices.npy",
+      "offsets_file": "f__f1_124__offsets.npy",
+      "weights_file": null,
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": null
+    },
+    "f1_125": {
+      "is_multi_hot": false,
+      "use_value": false,
+      "nnz_total": 40179176,
+      "indices_file": "f__f1_125__indices.npy",
+      "offsets_file": "f__f1_125__offsets.npy",
+      "weights_file": null,
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": null
+    },
+    "f1_126": {
+      "is_multi_hot": false,
+      "use_value": false,
+      "nnz_total": 40179176,
+      "indices_file": "f__f1_126__indices.npy",
+      "offsets_file": "f__f1_126__offsets.npy",
+      "weights_file": null,
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": null
+    },
+    "f1_127_14": {
+      "is_multi_hot": true,
+      "use_value": true,
+      "nnz_total": 2139749613,
+      "indices_file": "f__f1_127_14__indices.npy",
+      "offsets_file": "f__f1_127_14__offsets.npy",
+      "weights_file": "f__f1_127_14__weights.npy",
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": "float32"
+    },
+    "f1_127": {
+      "is_multi_hot": false,
+      "use_value": false,
+      "nnz_total": 40179176,
+      "indices_file": "f__f1_127__indices.npy",
+      "offsets_file": "f__f1_127__offsets.npy",
+      "weights_file": null,
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": null
+    },
+    "f1_128": {
+      "is_multi_hot": false,
+      "use_value": false,
+      "nnz_total": 40179176,
+      "indices_file": "f__f1_128__indices.npy",
+      "offsets_file": "f__f1_128__offsets.npy",
+      "weights_file": null,
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": null
+    },
+    "f1_129": {
+      "is_multi_hot": false,
+      "use_value": false,
+      "nnz_total": 40179176,
+      "indices_file": "f__f1_129__indices.npy",
+      "offsets_file": "f__f1_129__offsets.npy",
+      "weights_file": null,
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": null
+    },
+    "f1_150_14": {
+      "is_multi_hot": true,
+      "use_value": true,
+      "nnz_total": 3121875567,
+      "indices_file": "f__f1_150_14__indices.npy",
+      "offsets_file": "f__f1_150_14__offsets.npy",
+      "weights_file": "f__f1_150_14__weights.npy",
+      "indices_dtype": "int64",
+      "offsets_dtype": "int64",
+      "weights_dtype": "float32"
+    }
+  },
+  "generated_at": "2026-02-12T10:36:51Z"
+}

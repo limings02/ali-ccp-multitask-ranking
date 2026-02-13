@@ -301,6 +301,10 @@ def train_one_epoch(
         
         # Update global_step in loss_fn for aux_focal warmup control
         current_global_step = global_step + step
+        expert_diag_should_log_train = (
+            expert_health_diag is not None
+            and expert_health_diag.should_log(current_global_step, "train")
+        )
         
         # Check if we've reached max_train_steps (for early stopping or resume)
         if max_steps is not None and current_global_step >= max_steps:
@@ -364,7 +368,7 @@ def train_one_epoch(
             # ============================================================
             # 专家健康诊断: 收集 gate weights（在 backward 之前）
             # ============================================================
-            if expert_health_diag is not None:
+            if expert_diag_should_log_train:
                 gates = aux.get("gates")
                 if gates:
                     for task, gate_w in gates.items():
@@ -490,7 +494,7 @@ def train_one_epoch(
             # ============================================================
             # 专家健康诊断: 收集梯度信息（在 backward 之后、zero_grad 之前）
             # ============================================================
-            if expert_health_diag is not None and expert_health_diag.should_log(current_global_step, "train"):
+            if expert_diag_should_log_train:
                 # 在 backward 完成后收集梯度诊断并记录
                 expert_health_diag.compute_and_log(
                     step=current_global_step,
