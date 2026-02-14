@@ -1,0 +1,230 @@
+# Ablation diff vs mmoe_baseline:
+# - keep ESMM v2 chain, but optimize CTCVR only:
+#   esmm.lambda_ctr=0.0, esmm.lambda_ctcvr=1.0, esmm.lambda_cvr_aux=0.0
+# - keep ctr+cvr outputs enabled (ESMM v2 contract requires both logits)
+# - runtime.best_selection: primary=auc_ctcvr, aux_keys=[]
+experiment:
+  name: single_task_ctcvr
+use_esmm: true
+esmm:
+  version: v2
+  eps: 1.0e-08
+  lambda_ctr: 0.0
+  lambda_ctcvr: 1.0
+  lambda_cvr_aux: 0.0
+  residual:
+    enabled: false
+    input: mmoe_cvr
+    stop_grad_input: true
+    mlp_dims:
+    - 64
+    dropout: 0.1
+    use_layernorm: true
+    alpha: 1.0
+    res_reg_weight: 0.0005
+    anchor:
+      enabled: false
+      weight: 0.02
+      eps: 1.0e-06
+data:
+  metadata_path: data/processed/metadata.json
+  batch_size: 2048
+  num_workers: 0
+  num_workers_valid: 0
+  prefetch_factor: 1
+  pin_memory: true
+  persistent_workers: false
+  drop_last: false
+  debug: false
+  seed: 20260127
+  neg_keep_prob_train: 1.0
+sampling:
+  negative_sampling: none
+embedding:
+  default_embedding_dim: 8
+  embedding_dim_overrides: {}
+  mode: sum
+  sparse_grad: true
+model:
+  name: single_task_ctcvr
+  mtl: mmoe
+  enabled_heads:
+  - ctr
+  - cvr
+  tasks:
+  - ctr
+  - cvr
+  backbone:
+    use_legacy_pseudo_deepfm: false
+    return_logit_parts: true
+    per_head_add:
+      ctr:
+        use_wide: false
+        use_fm: false
+      cvr:
+        use_wide: false
+        use_fm: false
+    deep_hidden_dims:
+    - 128
+    - 64
+    deep_dropout: 0.2
+    deep_activation: relu
+    deep_use_bn: false
+    fm_enabled: false
+    fm_projection_dim: 16
+    out_dim: 64
+  mmoe:
+    num_experts: 4
+    expert_mlp_dims:
+    - 128
+    gate_type: linear
+    gate_hidden_dims:
+    - 32
+    input: deep_h
+    dropout: 0.0
+    log_gates: true
+    gate_stabilize:
+      enabled: true
+      eps: 1.0e-08
+      entropy_reg_weight: 0.0003
+      load_balance_kl_weight: 0.0003
+      log_stats: true
+      schedule:
+        enabled: true
+        warm_frac: 0.2
+        temperature_start: 1.2
+        temperature_end: 1.0
+        noise_std_start: 0.03
+        noise_std_end: 0.01
+  heads:
+    default:
+      mlp_dims:
+      - 128
+      dropout: 0.1
+      use_bn: false
+      activation: relu
+    ctr: {}
+    cvr: {}
+optim:
+  type: dual_sparse_dense
+  dense:
+    lr: 0.0006
+    weight_decay: 1e-5
+    betas:
+    - 0.9
+    - 0.999
+    eps: 1.0e-08
+  sparse:
+    enabled: true
+    lr: 0.001
+    betas:
+    - 0.9
+    - 0.999
+    eps: 1.0e-08
+    allow_fallback_if_empty: false
+  lr_scheduler:
+    enabled: true
+    target: both
+    type: cosine
+    warmup_steps: 4000
+    total_steps: 40000
+    min_lr_ratio: 0.1
+loss:
+  w_ctr: 1.0
+  w_cvr: 1.0
+  eps: 1.0e-06
+  pos_weight_dynamic: false
+  static_pos_weight:
+    ctr: 1
+    ctcvr: 1
+  neg_sample_weight_correction: false
+  pos_weight_clip:
+    ctr: 10
+    ctcvr: 20
+  pos_weight_clip_schedule:
+    enabled: false
+    target: ctcvr
+    type: piecewise
+    milestones:
+    - 0
+    - 8000
+    values:
+    - 300
+    - 30
+  aux_focal:
+    enabled: false
+    warmup_steps: 8000
+    target_head: ctcvr
+    lambda: 0.05
+    gamma: 1.0
+    use_alpha: false
+    alpha: 0.25
+    detach_p_for_weight: true
+    compute_fp32: true
+    log_components: true
+runtime:
+  device: cuda
+  epochs: 2
+  log_every: 3000
+  amp: true
+  grad_diag_enabled: true
+  grad_samples_target: 200
+  grad_diag_every: 1000
+  grad_diag_min_tasks: 2
+  log_health_metrics: true
+  max_train_steps: 40000
+  max_valid_steps: null
+  grad_clip_norm: 2.0
+  seed: 20260127
+  resume_path: null
+  auto_eval: true
+  auto_eval_split: valid
+  auto_eval_save_preds: true
+  auto_eval_ckpt: best
+  save_last: false
+  best_selection:
+    strategy: gate
+    primary_key: auc_ctcvr
+    aux_keys: []
+    use_primary_ma: false
+    ma_window: 5
+    tol_primary: 0.0001
+    tol_aux:
+      auc_ctr: 0.003
+      auc_cvr: 0.008
+    confirm_times: 1
+    cooldown_evals: 0
+    log_decision: true
+  expert_health_diag:
+    enabled: true
+    log_interval: 1000
+    log_on_valid: true
+    utilization:
+      enabled: true
+      dead_mean_threshold: 0.01
+      dead_p95_threshold: 0.01
+      dead_require_p95: false
+      rank_dom_top1_threshold: 0.95
+      rank_dom_uniform_eps: 0.03
+      rank_dom_std_eps: 0.02
+      monopoly_top1_threshold: 0.95
+      monopoly_mean_threshold: null
+      compute_gini: true
+    output_stats:
+      enabled: true
+      per_expert_stats: true
+      cross_expert_similarity: true
+      similarity_alert_threshold: 0.95
+    gradient:
+      enabled: true
+      per_expert_grad_norm: true
+      vanish_threshold: 1.0e-06
+      explode_threshold: 100.0
+    type_specialization:
+      enabled: true
+      aggregate_by_type: true
+      cross_task_specialization: true
+    aligner:
+      enabled: true
+      log_scale_stats: true
+      log_distribution_change: false

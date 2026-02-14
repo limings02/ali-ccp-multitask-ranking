@@ -226,3 +226,6 @@ python -m src.cli.main train --config configs/experiments/mtl_mmoe.yaml
 - **共享 vs 专属路由**：通过 gate_reg_scope="shared_only" 只约束 shared experts 的路由均匀性，避免过度正则化 task-specific 专家
 - **最小侵入**：复用 MMoE 的 gate 稳定化、composer、TaskHead 等接口，仅改变 expert 组织结构
 - **可复现性**：与 MMoE 共享 ESMM/Loss/Metrics/Optimizer 完整体系
+
+
+python tools/run_ablation_main.py && python tools/summarize_main_ablation.py --manifest reports/main_ablation/main_ablation_runs.json --out-dir reports/main_ablation

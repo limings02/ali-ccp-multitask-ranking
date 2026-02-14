@@ -42,6 +42,11 @@ EXPERIMENTS = [
         "description": "Classic MMoE with lambda_ctcvr=3.0"
     },
     {
+        "name": "classic_mmoe_lambda5",
+        "config": "configs/experiments/mmoe_optim/pareto_analy/classic_mmoe_lambda5.yaml",
+        "description": "Classic MMoE with lambda_ctcvr=5.0"
+    },
+    {
         "name": "classic_mmoe_lambda7",
         "config": "configs/experiments/mmoe_optim/pareto_analy/classic_mmoe_lambda7.yaml",
         "description": "Classic MMoE with lambda_ctcvr=7.0"
@@ -55,6 +60,21 @@ EXPERIMENTS = [
         "name": "classic_mmoe_lambda13",
         "config": "configs/experiments/mmoe_optim/pareto_analy/classic_mmoe_lambda13.yaml",
         "description": "Classic MMoE with lambda_ctcvr=13.0"
+    },
+    {
+        "name": "use_resi_mmoe_lambda5",
+        "config": "configs/experiments/mmoe_optim/pareto_analy/use_resi_mmoe_lambda5.yaml",
+        "description": "MMoE with residual enabled, lambda_ctcvr=5.0"
+    },
+    {
+        "name": "use_focal_mmoe_lambda5",
+        "config": "configs/experiments/mmoe_optim/pareto_analy/use_focal_mmoe_lambda5.yaml",
+        "description": "MMoE with aux focal enabled, lambda_ctcvr=5.0"
+    },
+    {
+        "name": "use_focal_resi_mmoe_lambda5",
+        "config": "configs/experiments/mmoe_optim/pareto_analy/use_focal_resi_mmoe_lambda5.yaml",
+        "description": "MMoE with residual + aux focal, lambda_ctcvr=5.0"
     },
 ]
 

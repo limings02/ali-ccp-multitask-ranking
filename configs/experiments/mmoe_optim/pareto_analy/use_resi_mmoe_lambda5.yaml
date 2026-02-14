@@ -1,6 +1,6 @@
 
 experiment:
-  name: "classic_mmoe_lambda5"
+  name: "use_resi_mmoe_lambda5"
 
 # ESMM toggle
 use_esmm: true
@@ -12,7 +12,7 @@ esmm:
   lambda_cvr_aux: 0.3
 
   residual:
-    enabled: false                   # 开启 residual 修正
+    enabled: true                   # 开启 residual 修正
     input: "mmoe_cvr"               # 输入来源: CVR 分支的 MMoE/PLE 输出
     stop_grad_input: true          # false: 允许 ctcvr loss 更新 shared/moe 表征
                                     # true: 阻断梯度，仅更新 residual head

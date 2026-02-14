@@ -1,6 +1,6 @@
 
 experiment:
-  name: "classic_mmoe_lambda5"
+  name: "use_focal_mmoe_lambda5"
 
 # ESMM toggle
 use_esmm: true
@@ -171,8 +171,8 @@ loss:
     milestones: [0, 8000]
     values: [300, 30]
   aux_focal:
-    enabled: false
-    warmup_steps: 8000
+    enabled: true
+    warmup_steps: 5000
     target_head: "ctcvr"
     lambda: 0.05
     gamma: 1.0
