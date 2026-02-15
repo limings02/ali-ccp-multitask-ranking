@@ -1,5 +1,5 @@
 experiment:
-  name: asym_head_optim
+  name: asym_ctr128_head_optim
 use_esmm: true
 esmm:
   version: v2
@@ -99,7 +99,7 @@ model:
       use_bn: false
       activation: relu
     ctr:
-      mlp_dims: [64]         # 或者直接 [] 做成线性 head（看你代码是否支持）
+      mlp_dims: [128]         # 或者直接 [] 做成线性 head（看你代码是否支持）
       dropout: 0.05
       use_bn: false
       activation: "relu"

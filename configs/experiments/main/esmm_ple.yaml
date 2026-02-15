@@ -72,40 +72,60 @@ model:
     fm_enabled: false
     fm_projection_dim: 16
     out_dim: 64
-  mmoe:
-    num_experts: 4
-    expert_mlp_dims:
-    - 128
+
+  ple:
+    num_ple_layers: 2        # 1 = 单层, 2 = 两层（可扩展到N层）
+    
+    # 第一层配置
+    layer1:
+      shared_num_experts: 4
+      specific_num_experts:
+        ctr: 1
+        cvr: 2
+      expert_mlp_dims: [128]
+      dropout: 0.2
+      activation: relu
+      use_bn: false
+    
+    # 第二层配置（更任务专用/更分离）
+    layer2:
+      shared_num_experts: 2
+      specific_num_experts:
+        ctr: 1      # CTR任务在第二层有2个私有专家（更分离）
+        cvr: 2      # CVR任务在第二层有2个私有专家（更分离）
+      expert_mlp_dims: [128]    # 可以配置不同维度
+      dropout: 0.2
+      activation: relu
+      use_bn: false
+
     gate_type: linear
     gate_hidden_dims:
     - 32
-    input: deep_h
-    dropout: 0.0
     log_gates: true
     gate_stabilize:
       enabled: true
       eps: 1.0e-08
-      entropy_reg_weight: 0.0003
-      load_balance_kl_weight: 0.0003
+      entropy_reg_weight: 3.0e-4
+      load_balance_kl_weight: 3.0e-4
       log_stats: true
       schedule:
         enabled: true
         warm_frac: 0.2
-        temperature_start: 1.2
+        temperature_start: 1.4
         temperature_end: 1.0
-        noise_std_start: 0.03
+        noise_std_start: 0.05
         noise_std_end: 0.01
-  ple:
-    hetero_enabled: false
-    shared_num_experts: 3
-    specific_num_experts:
-      ctr: 1
-      cvr: 1
-    expert_mlp_dims:
-    - 128
-    gate_type: linear
-    gate_hidden_dims:
-    - 32
+    gate_reg_scope: shared_only
+    gate_shared_mass_floor:
+      enabled: false
+      per_task:
+        ctr:
+          min_mass: 0.5
+          weight: 0.001
+        cvr:
+          min_mass: 0.2
+          weight: 0.0005
+
     input: deep_h
     dropout: 0.0
     activation: relu
@@ -124,7 +144,6 @@ model:
         temperature_end: 1.0
         noise_std_start: 0.03
         noise_std_end: 0.01
-    gate_reg_scope: shared_only
   heads:
     default:
       mlp_dims:

@@ -5,9 +5,9 @@
 #   and keeps optional cvr aux if lambda_cvr_aux>0
 experiment:
   name: shared_bottom
-use_esmm: true
+use_esmm: false
 esmm:
-  version: legacy
+  version: v2
   eps: 1.0e-08
   lambda_ctr: 1.0
   lambda_ctcvr: 10.0

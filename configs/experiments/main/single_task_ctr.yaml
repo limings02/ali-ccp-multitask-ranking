@@ -46,7 +46,7 @@ embedding:
   sparse_grad: true
 model:
   name: single_task_ctr
-  mtl: mmoe
+  mtl: sharedbottom
   enabled_heads:
   - ctr
   tasks:

@@ -47,7 +47,7 @@ embedding:
   sparse_grad: true
 model:
   name: single_task_cvr
-  mtl: mmoe
+  mtl: shared_bottom
   enabled_heads:
   - cvr
   tasks:
