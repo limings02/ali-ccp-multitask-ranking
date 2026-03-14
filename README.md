@@ -214,7 +214,7 @@ python -m src.cli.main eval --config runs/shared_bottom_esmm_20260215_060628/con
 - 想一次性跑更完整的结构演进实验，可以看 [`scripts/run_interview_chain.py`](scripts/run_interview_chain.py) 或直接 `make interview-chain`。
 - 想看 featuremap 证据链，可以额外跑 `eda` / `eda-extra`，入口在 [`src/cli/main.py`](src/cli/main.py)。
 
-## 7. 项目亮点（面试视角）
+## 7. 项目亮点
 
 - 为什么要防 `entity_id` 泄漏：Ali-CCP 的公共特征会复用到同一实体的多条曝光，如果随机切分，valid 很容易偷看到训练时已经出现过的实体侧信息。这里我用的是 entity 级稳定哈希切分，让 valid 更接近“新实体/新样本”场景。
 - 为什么 ESMM 上还要继续做 MMoE / PLE：ESMM 解决的是样本选择偏差，不等于共享结构本身就合理了。CTR 和 CVR / CTCVR 仍然可能在共享表示上互相拖累，所以后面才会继续看软共享、shared/private experts 和异构专家。
